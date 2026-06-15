@@ -2,7 +2,7 @@
 
 Tails NetLogger's `Contacts.adi` file and forwards new QSOs in real-time to:
 - **WaveLog** — via HTTP REST API
-- **N3FJP AC Log** — via TCP API (`ADDADIFRECORD` command)
+- **N3FJP AC Log** — via its TCP server
 
 Either or both outputs can be enabled independently.
 
