@@ -164,12 +164,30 @@ def read_new_records(adi_path: Path, offset: int) -> tuple[list[str], int]:
         return [], offset
 
 
+ADIF_FIELD_RE = re.compile(r'<(\w+):(\d+)(?::\w+)?>', re.IGNORECASE)
+
+
 def normalize_adif(raw: str) -> str:
     """
-    Return the raw ADIF record with <EOR> appended (uppercase, clean).
-    The record is already valid ADIF — just ensure it ends with <EOR>.
+    Re-serialize the ADIF record as a single line, ending with <EOR>.
+
+    NetLogger writes one field per line, with some values (e.g. Address)
+    spanning multiple lines. Blindly collapsing whitespace would shorten
+    those values without updating their declared <TAG:LENGTH>, desyncing
+    every field after it. Instead, each field is read using its declared
+    length, internal whitespace is collapsed, and the length is recomputed
+    to match. Fields are concatenated with no separators, matching the
+    format N3FJP's ADDADIFRECORD API documents:
+    <CALL:6>KA3SEQ<QSO_Date:8>20220317<Time_On:6>205405<Band:3>40M<Mode:3>SSB<EOR>
     """
-    return raw.strip() + " <EOR>"
+    fields = []
+    for match in ADIF_FIELD_RE.finditer(raw):
+        tag = match.group(1)
+        length = int(match.group(2))
+        value = raw[match.end():match.end() + length]
+        value = " ".join(value.split())
+        fields.append(f"<{tag}:{len(value)}>{value}")
+    return "".join(fields) + "<EOR>"
 
 
 def extract_field(adif: str, field: str) -> str:
@@ -192,11 +210,11 @@ def send_to_wavelog(cfg: configparser.SectionProxy, adif: str) -> bool:
     }
     try:
         resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code == 200:
+        if resp.status_code in (200, 201):
             data = resp.json()
-            if data.get("status") == "created" or "added" in str(data).lower():
+            if data.get("status") == "created" and data.get("adif_count", 0) > 0:
                 return True
-            log.warning(f"WaveLog unexpected response: {data}")
+            log.warning(f"WaveLog did not import the record: {data}")
             return False
         log.error(f"WaveLog HTTP {resp.status_code}: {resp.text[:200]}")
         return False
@@ -212,19 +230,33 @@ def send_to_wavelog(cfg: configparser.SectionProxy, adif: str) -> bool:
 def send_to_n3fjp(host: str, port: int, adif: str) -> bool:
     """
     Send ADDADIFRECORD command to N3FJP AC Log via TCP.
-    Protocol: <CMD><ADDADIFRECORD><VALUE>{adif}</CMD>
+    Protocol: <CMD><ADDADIFRECORD><VALUE>{adif}</VALUE></CMD>
     Reference: http://www.n3fjp.com/help/api.html
     """
-    command = f"<CMD><ADDADIFRECORD><VALUE>{adif}</CMD>\r\n"
+    command = f"<CMD><ADDADIFRECORD><VALUE>{adif}</VALUE></CMD>\r\n"
+    log.debug(f"N3FJP command: {command.strip()}")
     try:
         with socket.create_connection((host, port), timeout=5) as sock:
+            log.debug(f"N3FJP connected to {host}:{port}")
             sock.sendall(command.encode("utf-8"))
+
+            # ADDADIFRECORD writes straight to the log file without
+            # refreshing N3FJP's on-screen list; CHECKLOG forces a reload
+            # so the new QSO appears immediately.
+            sock.sendall(b"<CMD><CHECKLOG></CMD>\r\n")
+
             sock.settimeout(2)
             try:
                 response = sock.recv(1024).decode("utf-8", errors="replace")
-                log.debug(f"N3FJP response: {response.strip()}")
+                if not response:
+                    log.debug("N3FJP closed the connection with no response")
+                else:
+                    log.debug(f"N3FJP response: {response.strip()}")
+                    if "error" in response.lower():
+                        log.error(f"N3FJP rejected record: {response.strip()}")
+                        return False
             except socket.timeout:
-                pass
+                log.debug("N3FJP sent no response within 2s (timeout)")
         return True
     except (socket.error, OSError) as e:
         log.error(f"N3FJP connection error ({host}:{port}): {e}")

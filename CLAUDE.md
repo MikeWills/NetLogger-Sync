@@ -45,11 +45,22 @@ polling loop in `run()`:
 3. **ADIF file tailer** (`read_new_records`, `normalize_adif`, `extract_field`) —
    reads bytes appended to `Contacts.adi` since the last saved offset, splits on
    `<eor>` (case-insensitive) to find complete records, and leaves any trailing
-   incomplete record unconsumed for the next poll. `normalize_adif` re-appends
-   `<EOR>`; `extract_field` does a simple regex pull of a field value (used only
-   for log messages).
+   incomplete record unconsumed for the next poll. `normalize_adif` re-parses each
+   `<TAG:LENGTH>value` field using its declared length, collapses internal
+   whitespace (NetLogger writes one field per line, with some values like Address
+   spanning multiple lines), recomputes the length, and concatenates fields with no
+   separators followed by `<EOR>` — matching the exact format N3FJP's
+   `ADDADIFRECORD` API expects. `extract_field` does a simple regex pull of a field
+   value (used only for log messages).
 4. **Output senders** (`send_to_wavelog`, `send_to_n3fjp`) — each takes a built ADIF
    record string and pushes it to one destination, returning a bool success flag.
+   `send_to_wavelog` treats HTTP 200/201 with `status: created` and `adif_count > 0`
+   as success (WaveLog returns 400 `status: abort` for duplicate QSOs — expected
+   when replaying already-logged contacts). `send_to_n3fjp` sends
+   `<CMD><ADDADIFRECORD><VALUE>...</VALUE></CMD>` followed by `<CMD><CHECKLOG></CMD>`
+   over TCP — ADDADIFRECORD writes directly to N3FJP's log file but doesn't refresh
+   its on-screen list, and CHECKLOG forces that reload. ADDADIFRECORD itself has no
+   documented response, so a timeout/no-response is normal, not an error.
 5. **State persistence** (`load_offset`, `save_offset`) — the byte offset into
    `Contacts.adi` is persisted to `state_file` (default `last_offset.txt`) after each
    record is processed, so restarts resume correctly. A missing/invalid state file
