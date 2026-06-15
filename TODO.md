@@ -25,3 +25,28 @@
 - [ ] Add HRD fields to the GUI, following the WaveLog/N3FJP `LabelFrame`
       pattern.
 - [ ] Update README.md setup instructions and CLAUDE.md architecture notes.
+
+## Add Log4OM support
+
+- [ ] Research Log4OM's local TCP/UDP command API for adding QSOs (confirm
+      command format, default port, and response handling, similar to how
+      N3FJP's `ADDADIFRECORD` was reverse-engineered).
+- [ ] Add a `send_to_log4om()` sender in `netlogger_bridge.py`.
+- [ ] Add `[log4om]` section to `SAMPLE_CONFIG` / `config.ini` (enabled, host,
+      port).
+- [ ] Add Log4OM fields to the GUI, following the WaveLog/N3FJP `LabelFrame`
+      pattern.
+- [ ] Update README.md setup instructions and CLAUDE.md architecture notes.
+
+## Add DXLab Suite (DXKeeper) support
+
+- [ ] Research DXKeeper's TCP command interface for adding QSOs (DXLab
+      Suite's commander API — confirm command format, default port, and
+      response handling, similar to how N3FJP's `ADDADIFRECORD` was
+      reverse-engineered).
+- [ ] Add a `send_to_dxkeeper()` sender in `netlogger_bridge.py`.
+- [ ] Add `[dxkeeper]` section to `SAMPLE_CONFIG` / `config.ini` (enabled,
+      host, port).
+- [ ] Add DXKeeper fields to the GUI, following the WaveLog/N3FJP
+      `LabelFrame` pattern.
+- [ ] Update README.md setup instructions and CLAUDE.md architecture notes.
