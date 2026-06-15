@@ -3,3 +3,6 @@ config.ini
 last_offset.txt
 last_contact_id.txt
 netlogger_bridge.log
+
+# Claude Code local settings
+.claude/
