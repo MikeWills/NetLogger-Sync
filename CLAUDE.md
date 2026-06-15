@@ -13,6 +13,9 @@ Either or both outputs can be enabled independently via `config.ini`.
 
 Always update the readme with relavant changes. Always do a security check. Always review project for unused code an remove.
 
+`config.ini` is the user's local runtime config (contains live API keys/host info) and
+is gitignored. Do not read, edit, or otherwise touch it unless the user explicitly asks.
+
 ## Running
 
 ```bash
