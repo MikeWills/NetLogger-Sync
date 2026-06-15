@@ -14,7 +14,11 @@ Either or both outputs can be enabled independently via `config.ini`.
 `netlogger_gui.py` is a Tkinter front-end over the same module: it edits
 `config.ini` via form fields and runs `bridge.run()` in a background thread
 (stoppable via a `threading.Event`), streaming log records into a text widget
-via a `QueueHandler`.
+via a `QueueHandler`. It also has a "Run automatically at login (background)"
+checkbox that registers/unregisters the headless CLI bridge (`netlogger_bridge`,
+pointed at the GUI's `config.ini`) with the OS scheduler — Task Scheduler
+(`schtasks`) on Windows, a `launchd` agent on macOS, or a `systemd --user`
+service on Linux.
 
 Always update the readme with relavant changes. Always do a security check. Always review project for unused code an remove.
 
@@ -88,6 +92,10 @@ polling loop in `run()`:
 
 ## Key implementation notes
 
+- `APP_DIR` (`resolve_path`) anchors `netlogger_bridge.log` and a relative
+  `state_file` to the script/exe's own directory rather than the process's cwd,
+  so the bridge behaves correctly when launched by a scheduler with an
+  arbitrary working directory.
 - The tailer operates on raw bytes/text — it does not parse NetLogger's ADIF fields
   beyond pulling `Call`/`Band`/`Mode` for log messages via `extract_field`. Records
   are forwarded as-is (with `<EOR>` re-appended), so any fields NetLogger writes are

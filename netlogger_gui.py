@@ -11,13 +11,114 @@ Python installs; on some Linux distros install the 'python3-tk' package).
 
 import logging
 import queue
+import subprocess
+import sys
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 
 import netlogger_bridge as bridge
 
 CONFIG_PATH = "config.ini"
+CONFIG_ABS_PATH = bridge.resolve_path(CONFIG_PATH)
+
+
+# ---------------------------------------------------------------------------
+# Autostart (Task Scheduler / launchd / systemd) — runs the headless CLI
+# bridge in the background at login, pointed at this GUI's config.ini.
+# ---------------------------------------------------------------------------
+TASK_NAME = "NetLoggerBridge"
+PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.netloggerbridge.bridge.plist"
+PLIST_LABEL = "com.netloggerbridge.bridge"
+UNIT_NAME = "netlogger-bridge.service"
+UNIT_PATH = Path.home() / ".config" / "systemd" / "user" / UNIT_NAME
+
+
+def _cli_command() -> list[str]:
+    if getattr(sys, "frozen", False):
+        exe_name = "netlogger_bridge.exe" if sys.platform == "win32" else "netlogger_bridge"
+        return [str(bridge.APP_DIR / exe_name), str(CONFIG_ABS_PATH)]
+    return [sys.executable, str(bridge.APP_DIR / "netlogger_bridge.py"), str(CONFIG_ABS_PATH)]
+
+
+def is_autostart_enabled() -> bool:
+    try:
+        if sys.platform == "win32":
+            result = subprocess.run(
+                ["schtasks", "/query", "/tn", TASK_NAME],
+                capture_output=True,
+            )
+            return result.returncode == 0
+        if sys.platform == "darwin":
+            return PLIST_PATH.exists()
+        result = subprocess.run(
+            ["systemctl", "--user", "is-enabled", UNIT_NAME],
+            capture_output=True,
+        )
+        return result.returncode == 0
+    except OSError:
+        return False
+
+
+def enable_autostart():
+    cmd = _cli_command()
+    if sys.platform == "win32":
+        tr = " ".join(f'"{c}"' for c in cmd)
+        subprocess.run(
+            ["schtasks", "/create", "/tn", TASK_NAME, "/tr", tr, "/sc", "onlogon", "/rl", "limited", "/f"],
+            check=True,
+        )
+    elif sys.platform == "darwin":
+        args_xml = "\n".join(f"        <string>{c}</string>" for c in cmd)
+        plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{PLIST_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+{args_xml}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+"""
+        PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PLIST_PATH.write_text(plist, encoding="utf-8")
+        subprocess.run(["launchctl", "load", "-w", str(PLIST_PATH)], check=True)
+    else:
+        exec_start = " ".join(f'"{c}"' for c in cmd)
+        unit = f"""[Unit]
+Description=NetLogger Bridge
+
+[Service]
+ExecStart={exec_start}
+Restart=always
+
+[Install]
+WantedBy=default.target
+"""
+        UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        UNIT_PATH.write_text(unit, encoding="utf-8")
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+        subprocess.run(["systemctl", "--user", "enable", "--now", UNIT_NAME], check=True)
+
+
+def disable_autostart():
+    if sys.platform == "win32":
+        subprocess.run(["schtasks", "/delete", "/tn", TASK_NAME, "/f"], check=True)
+    elif sys.platform == "darwin":
+        subprocess.run(["launchctl", "unload", "-w", str(PLIST_PATH)], check=False)
+        PLIST_PATH.unlink(missing_ok=True)
+    else:
+        subprocess.run(["systemctl", "--user", "disable", "--now", UNIT_NAME], check=False)
+        UNIT_PATH.unlink(missing_ok=True)
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
 
 
 class QueueHandler(logging.Handler):
@@ -37,7 +138,7 @@ class App(tk.Tk):
         self.title("NetLogger Bridge")
         self.geometry("640x560")
 
-        self.cfg = bridge.load_config_for_gui(CONFIG_PATH)
+        self.cfg = bridge.load_config_for_gui(CONFIG_ABS_PATH)
         self.stop_event = None
         self.worker = None
         self.log_queue = queue.Queue()
@@ -83,6 +184,14 @@ class App(tk.Tk):
         self.start_button.pack(side="left", padx=5)
         self.status_label = ttk.Label(buttons, text="Stopped")
         self.status_label.pack(side="left", padx=10)
+
+        self.autostart_var = tk.BooleanVar(value=is_autostart_enabled())
+        ttk.Checkbutton(
+            buttons,
+            text="Run automatically at login (background)",
+            variable=self.autostart_var,
+            command=self._toggle_autostart,
+        ).pack(side="left", padx=10)
 
         log_frame = ttk.LabelFrame(self, text="Log")
         log_frame.pack(fill="both", expand=True, padx=10, pady=5)
@@ -139,7 +248,7 @@ class App(tk.Tk):
         n3fjp["host"] = self.vars["n3fjp_host"].get()
         n3fjp["port"] = self.vars["n3fjp_port"].get()
 
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        with open(CONFIG_ABS_PATH, "w", encoding="utf-8") as f:
             self.cfg.write(f)
 
     # ------------------------------------------------------------------
@@ -158,12 +267,23 @@ class App(tk.Tk):
             self._save_config()
             self.stop_event = threading.Event()
             self.worker = threading.Thread(
-                target=bridge.run, args=(CONFIG_PATH, self.stop_event), daemon=True
+                target=bridge.run, args=(CONFIG_ABS_PATH, self.stop_event), daemon=True
             )
             self.worker.start()
             self.start_button.config(text="Stop")
             self.status_label.config(text="Running")
             self.after(500, self._watch_worker)
+
+    def _toggle_autostart(self):
+        try:
+            if self.autostart_var.get():
+                self._save_config()
+                enable_autostart()
+            else:
+                disable_autostart()
+        except (OSError, subprocess.CalledProcessError) as e:
+            self.autostart_var.set(not self.autostart_var.get())
+            messagebox.showerror("NetLogger Bridge", f"Could not update autostart: {e}")
 
     def _watch_worker(self):
         if self.worker and self.worker.is_alive():

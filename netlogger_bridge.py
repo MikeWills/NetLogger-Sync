@@ -23,6 +23,22 @@ except ImportError:
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
+# App directory (for locating files when launched from an arbitrary cwd,
+# e.g. by Task Scheduler / launchd / systemd)
+# ---------------------------------------------------------------------------
+if getattr(sys, "frozen", False):
+    APP_DIR = Path(sys.executable).resolve().parent
+else:
+    APP_DIR = Path(__file__).resolve().parent
+
+
+def resolve_path(path: str) -> Path:
+    """Resolve a possibly-relative path against APP_DIR rather than cwd."""
+    p = Path(path)
+    return p if p.is_absolute() else APP_DIR / p
+
+
+# ---------------------------------------------------------------------------
 # Logging setup
 # ---------------------------------------------------------------------------
 logging.basicConfig(
@@ -30,7 +46,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("netlogger_bridge.log", encoding="utf-8"),
+        logging.FileHandler(resolve_path("netlogger_bridge.log"), encoding="utf-8"),
     ],
 )
 log = logging.getLogger(__name__)
@@ -309,7 +325,7 @@ def run(config_path: str = "config.ini", stop_event=None):
     general = cfg["general"]
 
     poll_interval  = general.getint("poll_interval", fallback=10)
-    state_file     = general.get("state_file", "last_offset.txt")
+    state_file     = str(resolve_path(general.get("state_file", "last_offset.txt")))
     adi_path       = find_adi_file(general.get("contacts_adi", ""))
 
     wavelog_enabled = cfg.getboolean("wavelog", "enabled", fallback=False)

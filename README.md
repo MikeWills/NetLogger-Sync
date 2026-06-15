@@ -129,6 +129,12 @@ Logs go to console and `netlogger_bridge.log`.
 
 ## Running as a background service
 
+The GUI has a **"Run automatically at login (background)"** checkbox that sets
+this up for you — it registers the headless CLI bridge (pointed at the GUI's
+`config.ini`) with Task Scheduler (Windows), launchd (macOS), or a systemd user
+service (Linux), and unregisters it when unchecked. The sections below describe
+doing this manually.
+
 ### Windows (Task Scheduler)
 - Action: `python C:\path\to\netlogger_bridge.py`
 - Trigger: At log on / At startup
