@@ -4,6 +4,7 @@ last_offset.txt
 last_contact_id.txt
 netlogger_bridge.log
 netlogger_bridge_autostart.vbs
+netlogger_bridge_task.xml
 
 # Claude Code local settings
 .claude/

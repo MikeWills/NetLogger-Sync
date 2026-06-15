@@ -134,7 +134,9 @@ this up for you — it registers the headless CLI bridge (pointed at the GUI's
 `config.ini`) with Task Scheduler (Windows), launchd (macOS), or a systemd user
 service (Linux), and unregisters it when unchecked. On Windows, if Task
 Scheduler reports access denied, a UAC prompt will appear — approve it to
-register the task. The sections below describe doing this manually.
+register the task. On all three platforms, the bridge is automatically
+restarted if it crashes or is killed. The sections below describe doing this
+manually.
 
 ### Windows (Task Scheduler)
 - Action: `python C:\path\to\netlogger_bridge.py`

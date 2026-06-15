@@ -34,6 +34,7 @@ PLIST_LABEL = "com.netloggerbridge.bridge"
 UNIT_NAME = "netlogger-bridge.service"
 UNIT_PATH = Path.home() / ".config" / "systemd" / "user" / UNIT_NAME
 WRAPPER_PATH = bridge.APP_DIR / "netlogger_bridge_autostart.vbs"
+TASK_XML_PATH = bridge.APP_DIR / "netlogger_bridge_task.xml"
 
 
 def _cli_command() -> list[str]:
@@ -126,16 +127,51 @@ def enable_autostart():
     cmd = _cli_command()
     if sys.platform == "win32":
         # schtasks' /tr value is limited to 261 characters, which the full
-        # python.exe + script + config paths can easily exceed. Write a short
-        # VBScript wrapper holding the real command and point /tr at that —
-        # WScript.Shell.Run with window style 0 also launches it with no
-        # visible console window.
+        # python.exe + script + config paths can easily exceed, so the real
+        # command lives in a short VBScript wrapper instead. The wrapper runs
+        # it hidden (window style 0) and *waits* for it (bWaitOnReturn=True),
+        # propagating its exit code via WScript.Quit — this keeps the task
+        # "running" for as long as the bridge is alive, so Task Scheduler can
+        # detect a crash/kill and apply RestartOnFailure below.
         cmd_line = " ".join(f'"{c}"' for c in cmd)
         vbs_cmd = cmd_line.replace('"', '""')
-        vbs = f'CreateObject("WScript.Shell").Run "{vbs_cmd}", 0, False\n'
+        vbs = (
+            f'exitCode = CreateObject("WScript.Shell").Run("{vbs_cmd}", 0, True)\n'
+            f'WScript.Quit(exitCode)\n'
+        )
         WRAPPER_PATH.write_text(vbs, encoding="utf-8")
-        _run_schtasks(["/create", "/tn", TASK_NAME, "/tr", f'wscript.exe "{WRAPPER_PATH}"',
-                       "/sc", "onlogon", "/rl", "limited", "/f"])
+
+        task_xml = f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>wscript.exe</Command>
+      <Arguments>"{WRAPPER_PATH}"</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"""
+        TASK_XML_PATH.write_text(task_xml, encoding="utf-16")
+        _run_schtasks(["/create", "/tn", TASK_NAME, "/xml", str(TASK_XML_PATH), "/f"])
     elif sys.platform == "darwin":
         args_xml = "\n".join(f"        <string>{c}</string>" for c in cmd)
         plist = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -180,6 +216,7 @@ def disable_autostart():
     if sys.platform == "win32":
         _run_schtasks(["/delete", "/tn", TASK_NAME, "/f"])
         WRAPPER_PATH.unlink(missing_ok=True)
+        TASK_XML_PATH.unlink(missing_ok=True)
     elif sys.platform == "darwin":
         subprocess.run(["launchctl", "unload", "-w", str(PLIST_PATH)], check=False)
         PLIST_PATH.unlink(missing_ok=True)

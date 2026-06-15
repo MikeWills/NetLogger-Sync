@@ -22,6 +22,15 @@ service on Linux. On Windows, `schtasks /create`/`/delete` can fail with
 "Access is denied" depending on local policy; `_run_schtasks` retries via a
 UAC-elevated `ShellExecuteExW("runas", ...)` in that case.
 
+On Windows, the task is created from an XML definition (`/create /xml`, not
+`/tr`) so it can set `RestartOnFailure`. The action runs a VBScript wrapper
+(`netlogger_bridge_autostart.vbs`) that launches the bridge hidden *and waits*
+for it (`WScript.Shell.Run(..., 0, True)`), propagating its exit code via
+`WScript.Quit` — this keeps the task "running" for the bridge's lifetime so
+Task Scheduler notices if it's killed/crashes and restarts it. macOS/Linux get
+the same behavior via launchd's `KeepAlive` and systemd's `Restart=always`,
+which were already in place.
+
 Always update the readme with relavant changes. Always do a security check. Always review project for unused code an remove.
 
 `config.ini` is the user's local runtime config (contains live API keys/host info) and
