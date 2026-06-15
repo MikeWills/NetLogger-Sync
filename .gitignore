@@ -1,0 +1,5 @@
+# Local runtime config and state (contains API keys / host info)
+config.ini
+last_offset.txt
+last_contact_id.txt
+netlogger_bridge.log

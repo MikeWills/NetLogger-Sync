@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
 NetLogger Bridge
-Watches the NetLogger SQLite database for new contacts and forwards them
+Tails the NetLogger Contacts.adi file for new QSOs and forwards them
 to WaveLog (via HTTP API) and/or N3FJP AC Log (via TCP API).
 
 Cross-platform: Windows, macOS, Linux
 """
 
-import sqlite3
 import time
 import socket
-import json
 import logging
 import sys
 import os
+import re
 import configparser
 from pathlib import Path
-from datetime import datetime
 
 try:
     import requests
@@ -39,9 +37,9 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Config loader
+# Config
 # ---------------------------------------------------------------------------
-def load_config(config_path: str = "config.ini") -> configparser.ConfigParser:
+def load_config(config_path: str) -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
     if not Path(config_path).exists():
         log.error(f"Config file not found: {config_path}")
@@ -52,21 +50,20 @@ def load_config(config_path: str = "config.ini") -> configparser.ConfigParser:
 
 
 def create_sample_config():
-    """Write a sample config.ini to disk."""
     sample = """\
 [general]
-# Seconds between database polls
+# Seconds between file polls
 poll_interval = 10
 
-# Path to NetLogger's SQLite contacts database.
+# Path to NetLogger's Contacts.adi file.
 # Leave blank to auto-detect from default OS locations.
-# Windows default: %APPDATA%\\NetLogger\\contacts.db
-# macOS default:   ~/Library/Application Support/NetLogger/contacts.db
-# Linux default:   ~/.config/NetLogger/contacts.db
-netlogger_db =
+# Windows default: %APPDATA%\\NetLogger\\Contacts.adi
+# macOS default:   ~/Library/Application Support/NetLogger/Contacts.adi
+# Linux default:   ~/.config/NetLogger/Contacts.adi
+contacts_adi =
 
-# File used to persist the last-seen contact rowid across restarts
-state_file = last_contact_id.txt
+# File used to store the byte offset between restarts
+state_file = last_offset.txt
 
 [wavelog]
 # Set enabled = true to forward contacts to WaveLog
@@ -75,7 +72,7 @@ enabled = false
 # Base URL of your WaveLog instance (no trailing slash)
 url = https://log.example.com
 
-# WaveLog API key (Settings > API in WaveLog)
+# WaveLog API key (Admin > API Keys in WaveLog)
 api_key = YOUR_WAVELOG_API_KEY
 
 # Station profile ID from WaveLog
@@ -83,13 +80,13 @@ station_id = 1
 
 [n3fjp]
 # Set enabled = true to forward contacts to N3FJP AC Log via TCP API
-# NOTE: N3FJP AC Log runs on Windows only; this client can run anywhere
+# N3FJP AC Log runs on Windows only; enable in Settings > API > TCP API Enabled
 enabled = false
 
 # Hostname or IP of the machine running N3FJP AC Log
 host = 127.0.0.1
 
-# TCP port (default 1100; set in N3FJP: Settings > API > TCP API Enabled)
+# TCP port (default 1100)
 port = 1100
 """
     with open("config.ini", "w", encoding="utf-8") as f:
@@ -98,130 +95,91 @@ port = 1100
 
 
 # ---------------------------------------------------------------------------
-# NetLogger database helpers
+# ADI file location
 # ---------------------------------------------------------------------------
-NETLOGGER_DB_PATHS = {
-    "win32":  Path(os.environ.get("APPDATA", "~"), "NetLogger", "contacts.db"),
-    "darwin": Path("~/Library/Application Support/NetLogger/contacts.db").expanduser(),
-    "linux":  Path("~/.config/NetLogger/contacts.db").expanduser(),
+ADI_PATHS = {
+    "win32":  Path(os.environ.get("APPDATA", "~"), "NetLogger", "Contacts.adi"),
+    "darwin": Path("~/Library/Application Support/NetLogger/Contacts.adi").expanduser(),
+    "linux":  Path("~/.config/NetLogger/Contacts.adi").expanduser(),
 }
 
 
-def find_netlogger_db(cfg_path: str) -> Path:
+def find_adi_file(cfg_path: str) -> Path:
     if cfg_path:
         p = Path(cfg_path).expanduser()
         if not p.exists():
-            log.error(f"Configured NetLogger DB not found: {p}")
+            log.error(f"Configured Contacts.adi not found: {p}")
             sys.exit(1)
         return p
 
-    platform = sys.platform
-    default = NETLOGGER_DB_PATHS.get(platform if platform != "win32" else "win32")
+    platform = sys.platform if sys.platform != "win32" else "win32"
+    default = ADI_PATHS.get(platform)
     if default and default.exists():
-        log.info(f"Auto-detected NetLogger DB: {default}")
+        log.info(f"Auto-detected Contacts.adi: {default}")
         return default
 
     log.error(
-        "Could not auto-detect NetLogger database. "
-        "Set [general] netlogger_db in config.ini"
+        "Could not auto-detect Contacts.adi. "
+        "Set [general] contacts_adi in config.ini"
     )
     sys.exit(1)
 
 
-def get_column_names(db_path: Path) -> list[str]:
-    """Return column names for the Contacts table (handles schema variations)."""
-    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
-        cur = conn.execute("PRAGMA table_info(Contacts)")
-        return [row[1] for row in cur.fetchall()]
+# ---------------------------------------------------------------------------
+# ADIF file tailer
+# ---------------------------------------------------------------------------
 
-
-def fetch_new_contacts(db_path: Path, last_id: int) -> list[dict]:
-    """Return all Contacts rows with rowid > last_id, ordered by rowid."""
+def read_new_records(adi_path: Path, offset: int) -> tuple[list[str], int]:
+    """
+    Read any new complete ADIF records appended since `offset`.
+    Returns (list_of_adif_record_strings, new_offset).
+    Each record string is the raw text between the previous <eor> and the next one.
+    """
     try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.execute(
-                "SELECT rowid, * FROM Contacts WHERE rowid > ? ORDER BY rowid",
-                (last_id,),
-            )
-            return [dict(row) for row in cur.fetchall()]
-    except sqlite3.OperationalError as e:
-        log.warning(f"DB read error (NetLogger may be writing): {e}")
-        return []
+        with open(adi_path, "rb") as f:
+            f.seek(offset)
+            chunk = f.read()
+            new_offset = offset + len(chunk)
+
+        if not chunk:
+            return [], offset
+
+        text = chunk.decode("utf-8", errors="replace")
+
+        # Split on <eor> (case-insensitive); keep only complete records
+        parts = re.split(r'<eor>', text, flags=re.IGNORECASE)
+
+        # Last element is either empty or an incomplete record — don't process it
+        complete = parts[:-1]
+
+        # Calculate offset: only advance past complete records
+        incomplete_tail = parts[-1].encode("utf-8", errors="replace")
+        adjusted_offset = new_offset - len(incomplete_tail)
+
+        records = [p.strip() for p in complete if p.strip()]
+        return records, adjusted_offset
+
+    except OSError as e:
+        log.warning(f"File read error: {e}")
+        return [], offset
+
+
+def normalize_adif(raw: str) -> str:
+    """
+    Return the raw ADIF record with <EOR> appended (uppercase, clean).
+    The record is already valid ADIF — just ensure it ends with <EOR>.
+    """
+    return raw.strip() + " <EOR>"
+
+
+def extract_field(adif: str, field: str) -> str:
+    """Extract a single field value from an ADIF string for logging purposes."""
+    match = re.search(rf'<{field}:\d+>([^<]*)', adif, re.IGNORECASE)
+    return match.group(1).strip() if match else "?"
 
 
 # ---------------------------------------------------------------------------
-# ADIF builder
-# ---------------------------------------------------------------------------
-
-# Map common NetLogger column names → ADIF field names
-# NetLogger's exact schema isn't publicly documented; common column names are
-# listed here. Unknown columns are skipped gracefully.
-COLUMN_TO_ADIF = {
-    "Callsign":    "CALL",
-    "Call":        "CALL",
-    "QSODate":     "QSO_DATE",
-    "Date":        "QSO_DATE",
-    "TimeOn":      "TIME_ON",
-    "Time":        "TIME_ON",
-    "Band":        "BAND",
-    "Frequency":   "FREQ",
-    "Freq":        "FREQ",
-    "Mode":        "MODE",
-    "RSTSent":     "RST_SENT",
-    "RST_Sent":    "RST_SENT",
-    "RSTRcvd":     "RST_RCVD",
-    "RST_Rcvd":    "RST_RCVD",
-    "Name":        "NAME",
-    "QTH":         "QTH",
-    "State":       "STATE",
-    "County":      "CNTY",
-    "Country":     "COUNTRY",
-    "Comment":     "COMMENT",
-    "Notes":       "COMMENT",
-    "GridSquare":  "GRIDSQUARE",
-    "Grid":        "GRIDSQUARE",
-    "Operator":    "OPERATOR",
-    "NetName":     "APP_NETLOGGER_NET",
-    "Net":         "APP_NETLOGGER_NET",
-    "Power":       "TX_PWR",
-    "MyCall":      "STATION_CALLSIGN",
-    "StationCall": "STATION_CALLSIGN",
-}
-
-
-def row_to_adif(row: dict) -> str:
-    """Convert a Contacts table row dict to an ADIF record string."""
-    fields = []
-
-    for col, adif_tag in COLUMN_TO_ADIF.items():
-        value = row.get(col)
-        if value is None:
-            continue
-        value = str(value).strip()
-        if not value:
-            continue
-
-        # Normalize date: YYYY-MM-DD → YYYYMMDD
-        if adif_tag == "QSO_DATE" and "-" in value:
-            value = value.replace("-", "")
-
-        # Normalize time: HH:MM:SS or HH:MM → HHMMSS
-        if adif_tag == "TIME_ON":
-            value = value.replace(":", "")
-            if len(value) == 4:
-                value += "00"
-
-        fields.append(f"<{adif_tag}:{len(value)}>{value}")
-
-    if not fields:
-        return ""
-
-    return " ".join(fields) + " <EOR>"
-
-
-# ---------------------------------------------------------------------------
-# WaveLog output
+# WaveLog
 # ---------------------------------------------------------------------------
 
 def send_to_wavelog(cfg: configparser.SectionProxy, adif: str) -> bool:
@@ -248,26 +206,25 @@ def send_to_wavelog(cfg: configparser.SectionProxy, adif: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# N3FJP output
+# N3FJP
 # ---------------------------------------------------------------------------
 
 def send_to_n3fjp(host: str, port: int, adif: str) -> bool:
     """
-    Send an ADDADIFRECORD command to N3FJP AC Log via TCP.
-    Protocol: <CMD><ADDADIFRECORD><VALUE><adif string></CMD>
+    Send ADDADIFRECORD command to N3FJP AC Log via TCP.
+    Protocol: <CMD><ADDADIFRECORD><VALUE>{adif}</CMD>
     Reference: http://www.n3fjp.com/help/api.html
     """
     command = f"<CMD><ADDADIFRECORD><VALUE>{adif}</CMD>\r\n"
     try:
         with socket.create_connection((host, port), timeout=5) as sock:
             sock.sendall(command.encode("utf-8"))
-            # N3FJP sends back a response; read it briefly
             sock.settimeout(2)
             try:
                 response = sock.recv(1024).decode("utf-8", errors="replace")
                 log.debug(f"N3FJP response: {response.strip()}")
             except socket.timeout:
-                pass  # No response is also fine
+                pass
         return True
     except (socket.error, OSError) as e:
         log.error(f"N3FJP connection error ({host}:{port}): {e}")
@@ -275,18 +232,18 @@ def send_to_n3fjp(host: str, port: int, adif: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# State persistence
+# State persistence (byte offset)
 # ---------------------------------------------------------------------------
 
-def load_last_id(state_file: str) -> int:
+def load_offset(state_file: str) -> int:
     try:
         return int(Path(state_file).read_text().strip())
     except (FileNotFoundError, ValueError):
-        return 0
+        return -1  # -1 = not yet initialized
 
 
-def save_last_id(state_file: str, last_id: int):
-    Path(state_file).write_text(str(last_id))
+def save_offset(state_file: str, offset: int):
+    Path(state_file).write_text(str(offset))
 
 
 # ---------------------------------------------------------------------------
@@ -297,9 +254,9 @@ def run(config_path: str = "config.ini"):
     cfg = load_config(config_path)
     general = cfg["general"]
 
-    poll_interval = general.getint("poll_interval", fallback=10)
-    state_file    = general.get("state_file", "last_contact_id.txt")
-    db_path       = find_netlogger_db(general.get("netlogger_db", ""))
+    poll_interval  = general.getint("poll_interval", fallback=10)
+    state_file     = general.get("state_file", "last_offset.txt")
+    adi_path       = find_adi_file(general.get("contacts_adi", ""))
 
     wavelog_enabled = cfg.getboolean("wavelog", "enabled", fallback=False)
     n3fjp_enabled   = cfg.getboolean("n3fjp",   "enabled", fallback=False)
@@ -309,52 +266,47 @@ def run(config_path: str = "config.ini"):
         sys.exit(1)
 
     log.info(f"NetLogger Bridge starting — polling every {poll_interval}s")
-    log.info(f"Database : {db_path}")
-    log.info(f"WaveLog  : {'enabled' if wavelog_enabled else 'disabled'}")
-    log.info(f"N3FJP    : {'enabled' if n3fjp_enabled else 'disabled'}")
+    log.info(f"File    : {adi_path}")
+    log.info(f"WaveLog : {'enabled' if wavelog_enabled else 'disabled'}")
+    log.info(f"N3FJP   : {'enabled' if n3fjp_enabled else 'disabled'}")
 
-    # Show detected columns on first run (helps users verify schema mapping)
-    try:
-        cols = get_column_names(db_path)
-        log.info(f"Contacts table columns: {cols}")
-    except Exception as e:
-        log.warning(f"Could not read column names: {e}")
+    offset = load_offset(state_file)
 
-    last_id = load_last_id(state_file)
-    log.info(f"Resuming from contact rowid > {last_id}")
+    # First run: skip to end of existing file so we only forward NEW contacts
+    if offset == -1:
+        with open(adi_path, "rb") as f:
+            f.seek(0, 2)  # Seek to end
+            offset = f.tell()
+        save_offset(state_file, offset)
+        log.info(f"First run — starting at end of file (offset {offset}). "
+                 "Only new contacts logged from this point will be forwarded.")
+
+    else:
+        log.info(f"Resuming from byte offset {offset}")
 
     while True:
-        contacts = fetch_new_contacts(db_path, last_id)
+        records, offset = read_new_records(adi_path, offset)
 
-        for contact in contacts:
-            rowid    = contact["rowid"]
-            callsign = contact.get("Callsign") or contact.get("Call") or "?"
-            adif     = row_to_adif(contact)
+        for raw in records:
+            adif     = normalize_adif(raw)
+            callsign = extract_field(adif, "Call")
+            band     = extract_field(adif, "Band")
+            mode     = extract_field(adif, "Mode")
 
-            if not adif:
-                log.warning(f"rowid {rowid}: could not build ADIF (empty row?), skipping")
-                last_id = rowid
-                save_last_id(state_file, last_id)
-                continue
-
-            log.info(f"New contact rowid={rowid} call={callsign}")
+            log.info(f"New contact: {callsign} {band} {mode}")
             log.debug(f"ADIF: {adif}")
 
             if wavelog_enabled:
                 ok = send_to_wavelog(cfg["wavelog"], adif)
-                log.info(f"  WaveLog: {'OK' if ok else 'FAILED'}")
+                log.info(f"  WaveLog : {'OK' if ok else 'FAILED'}")
 
             if n3fjp_enabled:
                 host = cfg["n3fjp"].get("host", "127.0.0.1")
                 port = cfg["n3fjp"].getint("port", fallback=1100)
                 ok   = send_to_n3fjp(host, port, adif)
-                log.info(f"  N3FJP  : {'OK' if ok else 'FAILED'}")
+                log.info(f"  N3FJP   : {'OK' if ok else 'FAILED'}")
 
-            last_id = rowid
-            save_last_id(state_file, last_id)
-
-        if contacts:
-            log.info(f"Processed {len(contacts)} new contact(s). Last rowid={last_id}")
+            save_offset(state_file, offset)
 
         time.sleep(poll_interval)
 

@@ -4,12 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Single-file Python bridge (`netlogger_bridge.py`) that polls the NetLogger SQLite
-contacts database for new QSOs and forwards each one (as an ADIF record) to:
+Single-file Python bridge (`netlogger_bridge.py`) that tails NetLogger's `Contacts.adi`
+ADIF log file for newly appended QSO records and forwards each one to:
 - **WaveLog** via HTTP REST API (`POST {url}/api/qso`)
 - **N3FJP AC Log** via a raw TCP API (`<CMD><ADDADIFRECORD><VALUE>...</CMD>`)
 
 Either or both outputs can be enabled independently via `config.ini`.
+
+Always update the readme with relavant changes. Always do a security check. Always review project for unused code an remove.
 
 ## Running
 
@@ -35,28 +37,32 @@ polling loop in `run()`:
 
 1. **Config** (`load_config`, `create_sample_config`) — `configparser`-based, sections
    `[general]`, `[wavelog]`, `[n3fjp]`.
-2. **NetLogger DB access** (`find_netlogger_db`, `get_column_names`, `fetch_new_contacts`) —
-   opens the SQLite `Contacts` table read-only (`mode=ro`) and selects rows by
-   `rowid > last_id`. DB path auto-detection is OS-specific (`NETLOGGER_DB_PATHS`).
-3. **ADIF builder** (`COLUMN_TO_ADIF`, `row_to_adif`) — maps NetLogger column names to
-   ADIF field tags and formats a single ADIF record (`<TAG:len>value ... <EOR>`).
-   NetLogger's schema is not publicly documented, so this mapping is best-effort;
-   unmapped columns are skipped silently. On startup the bridge logs the actual
-   `Contacts` table columns to help diagnose mapping gaps.
+2. **ADI file location** (`find_adi_file`, `ADI_PATHS`) — locates NetLogger's
+   `Contacts.adi`, auto-detecting an OS-specific default path if `contacts_adi` is blank.
+3. **ADIF file tailer** (`read_new_records`, `normalize_adif`, `extract_field`) —
+   reads bytes appended to `Contacts.adi` since the last saved offset, splits on
+   `<eor>` (case-insensitive) to find complete records, and leaves any trailing
+   incomplete record unconsumed for the next poll. `normalize_adif` re-appends
+   `<EOR>`; `extract_field` does a simple regex pull of a field value (used only
+   for log messages).
 4. **Output senders** (`send_to_wavelog`, `send_to_n3fjp`) — each takes a built ADIF
-   string and pushes it to one destination, returning a bool success flag.
-5. **State persistence** (`load_last_id`, `save_last_id`) — last processed `rowid` is
-   persisted to `state_file` (default `last_contact_id.txt`) so restarts resume
-   correctly.
-6. **Main loop** (`run`) — for each poll cycle: fetch new contacts, build ADIF, send to
-   each enabled output, update/persist `last_id`, sleep `poll_interval` seconds.
+   record string and pushes it to one destination, returning a bool success flag.
+5. **State persistence** (`load_offset`, `save_offset`) — the byte offset into
+   `Contacts.adi` is persisted to `state_file` (default `last_offset.txt`) after each
+   record is processed, so restarts resume correctly. A missing/invalid state file
+   returns `-1`, meaning "uninitialized".
+6. **Main loop** (`run`) — on first run (`offset == -1`), seeks to EOF so only QSOs
+   logged *after* startup are forwarded; on subsequent runs resumes from the saved
+   offset. Each poll cycle: read new complete records, build ADIF, send to each
+   enabled output, save offset, sleep `poll_interval` seconds.
 
 ## Key implementation notes
 
-- When extending `COLUMN_TO_ADIF`, the dict is keyed by NetLogger column name and
-  valued by ADIF field tag — date values get `-` stripped (`YYYY-MM-DD` → `YYYYMMDD`)
-  and time values get `:` stripped and padded to `HHMMSS`.
-- `fetch_new_contacts` swallows `sqlite3.OperationalError` (NetLogger may be writing to
-  the DB concurrently) and returns an empty list rather than crashing.
+- The tailer operates on raw bytes/text — it does not parse NetLogger's ADIF fields
+  beyond pulling `Call`/`Band`/`Mode` for log messages via `extract_field`. Records
+  are forwarded as-is (with `<EOR>` re-appended), so any fields NetLogger writes are
+  passed through to WaveLog/N3FJP unchanged.
+- `read_new_records` only advances the offset past *complete* records (i.e. those
+  followed by `<eor>`); a partially-written trailing record is left for the next poll.
 - Logging goes to both stdout and `netlogger_bridge.log` (set up at module import time
   in `logging.basicConfig`).

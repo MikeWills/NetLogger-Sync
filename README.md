@@ -1,6 +1,6 @@
 # NetLogger Bridge
 
-Watches the NetLogger contacts database and forwards new QSOs in real-time to:
+Tails NetLogger's `Contacts.adi` file and forwards new QSOs in real-time to:
 - **WaveLog** — via HTTP REST API
 - **N3FJP AC Log** — via TCP API (`ADDADIFRECORD` command)
 
@@ -31,9 +31,9 @@ This creates `config.ini`. Edit it:
 
 ```ini
 [general]
-poll_interval = 10          # seconds between DB polls
-netlogger_db =              # leave blank to auto-detect
-state_file = last_contact_id.txt
+poll_interval = 10          # seconds between file polls
+contacts_adi =               # leave blank to auto-detect
+state_file = last_offset.txt
 
 [wavelog]
 enabled = true
@@ -47,21 +47,26 @@ host = 127.0.0.1
 port = 1100
 ```
 
-### 2. NetLogger database auto-detection
+### 2. NetLogger Contacts.adi auto-detection
 
-If `netlogger_db` is blank, the bridge looks here by default:
+If `contacts_adi` is blank, the bridge looks here by default:
 
 | OS      | Default path |
 |---------|--------------|
-| Windows | `%APPDATA%\NetLogger\contacts.db` |
-| macOS   | `~/Library/Application Support/NetLogger/contacts.db` |
-| Linux   | `~/.config/NetLogger/contacts.db` |
+| Windows | `%APPDATA%\NetLogger\Contacts.adi` |
+| macOS   | `~/Library/Application Support/NetLogger/Contacts.adi` |
+| Linux   | `~/.config/NetLogger/Contacts.adi` |
 
-If your install differs, set the full path in `[general] netlogger_db`.
+If your install differs, set the full path in `[general] contacts_adi`.
+
+> **Note:** On first run, the bridge starts reading from the *end* of the
+> existing `Contacts.adi` file — only QSOs logged after that point are
+> forwarded. The current byte offset is saved to `state_file` so restarts
+> resume from where they left off.
 
 ### 3. WaveLog setup
 
-1. In WaveLog, go to **Admin → API** and generate an API key
+1. In WaveLog, go to **Admin → API Keys** and generate an API key
 2. Set `url`, `api_key`, and `station_id` in `config.ini`
 3. Set `enabled = true`
 
@@ -93,19 +98,6 @@ python netlogger_bridge.py /path/to/myconfig.ini
 ```
 
 Logs go to console and `netlogger_bridge.log`.
-
----
-
-## Schema note
-
-NetLogger's SQLite schema isn't publicly documented. On first run the bridge
-logs the detected column names. If your column names differ from what's mapped,
-edit the `COLUMN_TO_ADIF` dictionary near the top of `netlogger_bridge.py`.
-
-Common column names the bridge already handles:
-`Callsign`, `Call`, `QSODate`, `Date`, `TimeOn`, `Time`, `Band`, `Frequency`,
-`Mode`, `RSTSent`, `RSTRcvd`, `Name`, `QTH`, `State`, `County`, `Country`,
-`Comment`, `Notes`, `GridSquare`, `Grid`, `Operator`, `NetName`, `Power`
 
 ---
 
