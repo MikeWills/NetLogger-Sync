@@ -33,6 +33,7 @@ PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.netloggerbridge.bri
 PLIST_LABEL = "com.netloggerbridge.bridge"
 UNIT_NAME = "netlogger-bridge.service"
 UNIT_PATH = Path.home() / ".config" / "systemd" / "user" / UNIT_NAME
+WRAPPER_PATH = bridge.APP_DIR / "netlogger_bridge_autostart.cmd"
 
 
 def _cli_command() -> list[str]:
@@ -64,9 +65,14 @@ def is_autostart_enabled() -> bool:
 def enable_autostart():
     cmd = _cli_command()
     if sys.platform == "win32":
-        tr = " ".join(f'"{c}"' for c in cmd)
+        # schtasks' /tr value is limited to 261 characters, which the full
+        # python.exe + script + config paths can easily exceed. Write a short
+        # wrapper script holding the real command and point /tr at that.
+        cmd_line = " ".join(f'"{c}"' for c in cmd)
+        WRAPPER_PATH.write_text(f"@echo off\n{cmd_line}\n", encoding="utf-8")
         subprocess.run(
-            ["schtasks", "/create", "/tn", TASK_NAME, "/tr", tr, "/sc", "onlogon", "/rl", "limited", "/f"],
+            ["schtasks", "/create", "/tn", TASK_NAME, "/tr", f'"{WRAPPER_PATH}"',
+             "/sc", "onlogon", "/rl", "limited", "/f"],
             check=True,
         )
     elif sys.platform == "darwin":
@@ -112,6 +118,7 @@ WantedBy=default.target
 def disable_autostart():
     if sys.platform == "win32":
         subprocess.run(["schtasks", "/delete", "/tn", TASK_NAME, "/f"], check=True)
+        WRAPPER_PATH.unlink(missing_ok=True)
     elif sys.platform == "darwin":
         subprocess.run(["launchctl", "unload", "-w", str(PLIST_PATH)], check=False)
         PLIST_PATH.unlink(missing_ok=True)
