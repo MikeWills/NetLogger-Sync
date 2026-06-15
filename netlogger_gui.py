@@ -10,6 +10,7 @@ Python installs; on some Linux distros install the 'python3-tk' package).
 """
 
 import logging
+import os
 import queue
 import subprocess
 import sys
@@ -212,6 +213,15 @@ WantedBy=default.target
         subprocess.run(["systemctl", "--user", "enable", "--now", UNIT_NAME], check=True)
 
 
+def start_bridge_now():
+    """Launch the registered autostart task/service immediately, instead of
+    waiting for the next login. macOS (RunAtLoad) and Linux (enable --now)
+    already start on registration; only Windows Task Scheduler needs this
+    extra nudge since its LogonTrigger otherwise only fires at next logon."""
+    if sys.platform == "win32":
+        _run_schtasks(["/run", "/tn", TASK_NAME])
+
+
 def disable_autostart():
     if sys.platform == "win32":
         _run_schtasks(["/delete", "/tn", TASK_NAME, "/f"])
@@ -224,6 +234,42 @@ def disable_autostart():
         subprocess.run(["systemctl", "--user", "disable", "--now", UNIT_NAME], check=False)
         UNIT_PATH.unlink(missing_ok=True)
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+
+
+# ---------------------------------------------------------------------------
+# Bridge process detection — works for any instance (GUI-launched or
+# autostart-launched) via the PID file the bridge writes on startup.
+# ---------------------------------------------------------------------------
+def _read_bridge_pid() -> int | None:
+    try:
+        return int(bridge.PID_FILE.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def _pid_running(pid: int) -> bool:
+    if sys.platform == "win32":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def get_running_bridge_pid() -> int | None:
+    """Return the PID of a running bridge process, or None if not running."""
+    pid = _read_bridge_pid()
+    if pid is not None and _pid_running(pid):
+        return pid
+    return None
 
 
 class QueueHandler(logging.Handler):
@@ -258,6 +304,7 @@ class App(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(200, self._poll_log_queue)
+        self.after(0, self._poll_process_status)
 
     # ------------------------------------------------------------------
     # Widgets
@@ -289,6 +336,9 @@ class App(tk.Tk):
         self.start_button.pack(side="left", padx=5)
         self.status_label = ttk.Label(buttons, text="Stopped")
         self.status_label.pack(side="left", padx=10)
+
+        self.process_label = ttk.Label(buttons, text="Bridge process: checking...")
+        self.process_label.pack(side="left", padx=10)
 
         self.autostart_var = tk.BooleanVar(value=is_autostart_enabled())
         ttk.Checkbutton(
@@ -369,6 +419,17 @@ class App(tk.Tk):
                 messagebox.showerror("NetLogger Bridge", "Enable WaveLog and/or N3FJP first.")
                 return
 
+            pid = get_running_bridge_pid()
+            if pid is not None:
+                if not messagebox.askyesno(
+                    "NetLogger Bridge",
+                    f"The bridge already appears to be running (PID {pid}), "
+                    "possibly started automatically at login. Running a second "
+                    "instance can cause duplicate or conflicting uploads.\n\n"
+                    "Start another instance anyway?",
+                ):
+                    return
+
             self._save_config()
             self.stop_event = threading.Event()
             self.worker = threading.Thread(
@@ -384,6 +445,8 @@ class App(tk.Tk):
             if self.autostart_var.get():
                 self._save_config()
                 enable_autostart()
+                if get_running_bridge_pid() is None:
+                    start_bridge_now()
             else:
                 disable_autostart()
         except (OSError, subprocess.CalledProcessError) as e:
@@ -396,6 +459,14 @@ class App(tk.Tk):
         else:
             self.start_button.config(text="Start", state="normal")
             self.status_label.config(text="Stopped")
+
+    def _poll_process_status(self):
+        pid = get_running_bridge_pid()
+        if pid is not None:
+            self.process_label.config(text=f"Bridge process: running (PID {pid})")
+        else:
+            self.process_label.config(text="Bridge process: not running")
+        self.after(2000, self._poll_process_status)
 
     # ------------------------------------------------------------------
     # Logging

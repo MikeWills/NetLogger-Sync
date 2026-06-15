@@ -132,11 +132,19 @@ Logs go to console and `netlogger_bridge.log`.
 The GUI has a **"Run automatically at login (background)"** checkbox that sets
 this up for you — it registers the headless CLI bridge (pointed at the GUI's
 `config.ini`) with Task Scheduler (Windows), launchd (macOS), or a systemd user
-service (Linux), and unregisters it when unchecked. On Windows, if Task
-Scheduler reports access denied, a UAC prompt will appear — approve it to
-register the task. On all three platforms, the bridge is automatically
-restarted if it crashes or is killed. The sections below describe doing this
-manually.
+service (Linux), and unregisters it when unchecked. Checking it also starts
+the bridge immediately (not just at the next login), as long as it isn't
+already running. On Windows, if Task Scheduler reports access denied, a UAC
+prompt will appear — approve it to register the task. On all three platforms,
+the bridge is automatically restarted if it crashes or is killed. The sections
+below describe doing this manually.
+
+The GUI's **"Bridge process"** indicator shows whether the bridge is currently
+running, whether it was started from the GUI's Start button or by the
+autostart task/service — it checks a PID file (`netlogger_bridge.pid`) that
+the bridge writes on startup and removes on exit. If you click **Start** while
+another instance is already running (e.g. the autostart task), the GUI warns
+you before launching a second one.
 
 ### Windows (Task Scheduler)
 - Action: `python C:\path\to\netlogger_bridge.py`

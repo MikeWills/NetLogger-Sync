@@ -38,6 +38,9 @@ def resolve_path(path: str) -> Path:
     return p if p.is_absolute() else APP_DIR / p
 
 
+PID_FILE = resolve_path("netlogger_bridge.pid")
+
+
 # ---------------------------------------------------------------------------
 # Logging setup
 # ---------------------------------------------------------------------------
@@ -354,38 +357,46 @@ def run(config_path: str = "config.ini", stop_event=None):
     else:
         log.info(f"Resuming from byte offset {offset}")
 
-    while stop_event is None or not stop_event.is_set():
-        records, offset = read_new_records(adi_path, offset)
+    try:
+        PID_FILE.write_text(str(os.getpid()))
 
-        for raw in records:
-            adif     = normalize_adif(raw)
-            callsign = extract_field(adif, "Call")
-            band     = extract_field(adif, "Band")
-            mode     = extract_field(adif, "Mode")
+        while stop_event is None or not stop_event.is_set():
+            records, offset = read_new_records(adi_path, offset)
 
-            log.info(f"New contact: {callsign} {band} {mode}")
-            log.debug(f"ADIF: {adif}")
+            for raw in records:
+                adif     = normalize_adif(raw)
+                callsign = extract_field(adif, "Call")
+                band     = extract_field(adif, "Band")
+                mode     = extract_field(adif, "Mode")
 
-            if wavelog_enabled:
-                ok = send_to_wavelog(cfg["wavelog"], adif)
-                log.info(f"  WaveLog : {'OK' if ok else 'FAILED'}")
+                log.info(f"New contact: {callsign} {band} {mode}")
+                log.debug(f"ADIF: {adif}")
 
-            if n3fjp_enabled:
-                host = cfg["n3fjp"].get("host", "127.0.0.1")
-                port = cfg["n3fjp"].getint("port", fallback=1100)
-                ok   = send_to_n3fjp(host, port, adif)
-                log.info(f"  N3FJP   : {'OK' if ok else 'FAILED'}")
+                if wavelog_enabled:
+                    ok = send_to_wavelog(cfg["wavelog"], adif)
+                    log.info(f"  WaveLog : {'OK' if ok else 'FAILED'}")
 
-            save_offset(state_file, offset)
+                if n3fjp_enabled:
+                    host = cfg["n3fjp"].get("host", "127.0.0.1")
+                    port = cfg["n3fjp"].getint("port", fallback=1100)
+                    ok   = send_to_n3fjp(host, port, adif)
+                    log.info(f"  N3FJP   : {'OK' if ok else 'FAILED'}")
+
+                save_offset(state_file, offset)
+
+            if stop_event is not None:
+                if stop_event.wait(poll_interval):
+                    break
+            else:
+                time.sleep(poll_interval)
 
         if stop_event is not None:
-            if stop_event.wait(poll_interval):
-                break
-        else:
-            time.sleep(poll_interval)
-
-    if stop_event is not None:
-        log.info("Bridge stopped.")
+            log.info("Bridge stopped.")
+    finally:
+        try:
+            PID_FILE.unlink()
+        except FileNotFoundError:
+            pass
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,23 @@ Task Scheduler notices if it's killed/crashes and restarts it. macOS/Linux get
 the same behavior via launchd's `KeepAlive` and systemd's `Restart=always`,
 which were already in place.
 
+The GUI's "Bridge process" label polls `get_running_bridge_pid()` every 2s,
+which reads `bridge.PID_FILE` (`netlogger_bridge.pid`) and checks the PID is
+still alive (`OpenProcess` on Windows, `os.kill(pid, 0)` elsewhere) — this
+detects the bridge whether it was started by the GUI's own worker thread or by
+the autostart task/service. `_toggle_run` (Start) warns and asks for
+confirmation if it detects another instance already running, since two
+instances sharing one `state_file`/offset can race.
+
+Checking the autostart box also starts the bridge immediately via
+`start_bridge_now()`, rather than waiting for the next login — on macOS/Linux
+this is a side effect of `launchctl load -w` (`RunAtLoad`) and
+`systemctl --user enable --now`, which already start the service on
+registration; on Windows it's an explicit `schtasks /run /tn NetLoggerBridge`
+since `LogonTrigger` alone wouldn't fire until the next logon.
+`_toggle_autostart` only calls this if `get_running_bridge_pid()` is `None`,
+to avoid starting a duplicate instance.
+
 Always update the readme with relavant changes. Always do a security check. Always review project for unused code an remove.
 
 `config.ini` is the user's local runtime config (contains live API keys/host info) and
@@ -99,7 +116,10 @@ polling loop in `run()`:
 6. **Main loop** (`run`) — on first run (`offset == -1`), seeks to EOF so only QSOs
    logged *after* startup are forwarded; on subsequent runs resumes from the saved
    offset. Each poll cycle: read new complete records, build ADIF, send to each
-   enabled output, save offset, sleep `poll_interval` seconds.
+   enabled output, save offset, sleep `poll_interval` seconds. While running, the
+   process's PID is written to `netlogger_bridge.pid` (via `PID_FILE`/`resolve_path`)
+   and removed in a `finally` block on exit, so the GUI can detect whether a bridge
+   process is alive regardless of how it was started.
 
 ## Key implementation notes
 
