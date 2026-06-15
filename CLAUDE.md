@@ -31,7 +31,15 @@ python netlogger_bridge.py
 python netlogger_bridge.py /path/to/myconfig.ini
 ```
 
-There is no test suite, build step, or linter configured.
+There is no test suite or linter configured.
+
+## Release builds
+
+`.github/workflows/release.yml` builds a standalone Windows executable with
+PyInstaller and publishes it to GitHub Releases as `NetLogger-Bridge-Windows.zip`
+whenever a tag matching `v*` is pushed. This is the install path for non-technical
+users (see README "Easy install"). The workflow also generates a fresh
+`config.ini` via `--create-config` and bundles it alongside the exe.
 
 ## Architecture
 

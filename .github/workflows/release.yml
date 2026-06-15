@@ -1,0 +1,46 @@
+name: Build and release Windows executable
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pyinstaller
+
+      - name: Build executable
+        run: |
+          pyinstaller --onefile --name netlogger_bridge netlogger_bridge.py
+
+      - name: Stage release files
+        run: |
+          mkdir release
+          copy dist\netlogger_bridge.exe release\
+          python netlogger_bridge.py --create-config
+          copy config.ini release\config.ini
+          del release\netlogger_bridge.log
+
+      - name: Create release archive
+        run: |
+          Compress-Archive -Path release\* -DestinationPath NetLogger-Bridge-Windows.zip
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: NetLogger-Bridge-Windows.zip
+          generate_release_notes: true

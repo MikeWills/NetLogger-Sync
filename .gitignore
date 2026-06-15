@@ -6,3 +6,8 @@ netlogger_bridge.log
 
 # Claude Code local settings
 .claude/
+
+# PyInstaller build output
+build/
+dist/
+*.spec

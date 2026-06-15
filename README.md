@@ -8,6 +8,19 @@ Either or both outputs can be enabled independently.
 
 ---
 
+## Easy install (Windows, no Python required)
+
+1. Go to the [Releases](https://github.com/MikeWills/NetLogger-Sync/releases) page
+2. Download `NetLogger-Bridge-Windows.zip` from the latest release
+3. Extract it, then edit `config.ini` as described in [Setup](#setup) below
+4. Double-click `netlogger_bridge.exe` to run
+
+This is the recommended option for club members who don't have Python installed.
+The sections below describe the Python-based setup, used for development or
+non-Windows platforms.
+
+---
+
 ## Requirements
 
 - Python 3.10+
