@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Workflow
+
+Do not commit directly to `main`. For any code change, create a new branch,
+commit there, push it, and open a pull request for review (the
+`claude-code-review` GitHub Action will run an automated review on it).
+
 ## Overview
 
 Single-file Python bridge (`netlogger_bridge.py`) that tails NetLogger's `Contacts.adi`
