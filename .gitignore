@@ -3,7 +3,7 @@ config.ini
 last_offset.txt
 last_contact_id.txt
 netlogger_bridge.log
-netlogger_bridge_autostart.cmd
+netlogger_bridge_autostart.vbs
 
 # Claude Code local settings
 .claude/

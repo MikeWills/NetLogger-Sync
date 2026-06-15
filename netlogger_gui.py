@@ -33,7 +33,7 @@ PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.netloggerbridge.bri
 PLIST_LABEL = "com.netloggerbridge.bridge"
 UNIT_NAME = "netlogger-bridge.service"
 UNIT_PATH = Path.home() / ".config" / "systemd" / "user" / UNIT_NAME
-WRAPPER_PATH = bridge.APP_DIR / "netlogger_bridge_autostart.cmd"
+WRAPPER_PATH = bridge.APP_DIR / "netlogger_bridge_autostart.vbs"
 
 
 def _cli_command() -> list[str]:
@@ -127,10 +127,14 @@ def enable_autostart():
     if sys.platform == "win32":
         # schtasks' /tr value is limited to 261 characters, which the full
         # python.exe + script + config paths can easily exceed. Write a short
-        # wrapper script holding the real command and point /tr at that.
+        # VBScript wrapper holding the real command and point /tr at that —
+        # WScript.Shell.Run with window style 0 also launches it with no
+        # visible console window.
         cmd_line = " ".join(f'"{c}"' for c in cmd)
-        WRAPPER_PATH.write_text(f"@echo off\n{cmd_line}\n", encoding="utf-8")
-        _run_schtasks(["/create", "/tn", TASK_NAME, "/tr", f'"{WRAPPER_PATH}"',
+        vbs_cmd = cmd_line.replace('"', '""')
+        vbs = f'CreateObject("WScript.Shell").Run "{vbs_cmd}", 0, False\n'
+        WRAPPER_PATH.write_text(vbs, encoding="utf-8")
+        _run_schtasks(["/create", "/tn", TASK_NAME, "/tr", f'wscript.exe "{WRAPPER_PATH}"',
                        "/sc", "onlogon", "/rl", "limited", "/f"])
     elif sys.platform == "darwin":
         args_xml = "\n".join(f"        <string>{c}</string>" for c in cmd)
