@@ -57,7 +57,7 @@ state_file = last_offset.txt
 
 [wavelog]
 enabled = true
-url = https://log.example.com
+url = https://log.example.com/index.php
 api_key = YOUR_WAVELOG_API_KEY
 station_id = 1
 

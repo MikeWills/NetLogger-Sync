@@ -87,8 +87,8 @@ state_file = last_offset.txt
 # Set enabled = true to forward contacts to WaveLog
 enabled = false
 
-# Base URL of your WaveLog instance (no trailing slash)
-url = https://log.example.com
+# Base URL of your WaveLog instance, including index.php (no trailing slash)
+url = https://log.example.com/index.php
 
 # WaveLog API key (Admin > API Keys in WaveLog)
 api_key = YOUR_WAVELOG_API_KEY
