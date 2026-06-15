@@ -1,4 +1,4 @@
-name: Build and release Windows executable
+name: Build and release executables
 
 on:
   push:
@@ -10,7 +10,16 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            asset_name: NetLogger-Bridge-Windows
+          - os: macos-latest
+            asset_name: NetLogger-Bridge-macOS
+          - os: ubuntu-latest
+            asset_name: NetLogger-Bridge-Linux
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -18,29 +27,57 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install Tk (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests pyinstaller
 
-      - name: Build executable
-        run: |
-          pyinstaller --onefile --name netlogger_bridge netlogger_bridge.py
+      - name: Build CLI executable
+        run: pyinstaller --onefile --name netlogger_bridge netlogger_bridge.py
+
+      - name: Build GUI executable (Windows)
+        if: runner.os == 'Windows'
+        run: pyinstaller --onefile --windowed --name netlogger_gui netlogger_gui.py
+
+      - name: Build GUI executable (macOS/Linux)
+        if: runner.os != 'Windows'
+        run: pyinstaller --onefile --name netlogger_gui netlogger_gui.py
 
       - name: Stage release files
+        shell: bash
         run: |
           mkdir release
-          copy dist\netlogger_bridge.exe release\
+          cp dist/netlogger_bridge* release/
+          cp dist/netlogger_gui* release/
           python netlogger_bridge.py --create-config
-          copy config.ini release\config.ini
-          del release\netlogger_bridge.log
+          cp config.ini release/config.ini
+          rm -f release/netlogger_bridge.log
 
       - name: Create release archive
-        run: |
-          Compress-Archive -Path release\* -DestinationPath NetLogger-Bridge-Windows.zip
+        shell: bash
+        run: python -c "import shutil; shutil.make_archive('${{ matrix.asset_name }}', 'zip', 'release')"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: NetLogger-Bridge-Windows.zip
+          files: artifacts/**/*.zip
           generate_release_notes: true

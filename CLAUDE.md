@@ -11,6 +11,11 @@ ADIF log file for newly appended QSO records and forwards each one to:
 
 Either or both outputs can be enabled independently via `config.ini`.
 
+`netlogger_gui.py` is a Tkinter front-end over the same module: it edits
+`config.ini` via form fields and runs `bridge.run()` in a background thread
+(stoppable via a `threading.Event`), streaming log records into a text widget
+via a `QueueHandler`.
+
 Always update the readme with relavant changes. Always do a security check. Always review project for unused code an remove.
 
 `config.ini` is the user's local runtime config (contains live API keys/host info) and
@@ -35,11 +40,14 @@ There is no test suite or linter configured.
 
 ## Release builds
 
-`.github/workflows/release.yml` builds a standalone Windows executable with
-PyInstaller and publishes it to GitHub Releases as `NetLogger-Bridge-Windows.zip`
-whenever a tag matching `v*` is pushed. This is the install path for non-technical
-users (see README "Easy install"). The workflow also generates a fresh
-`config.ini` via `--create-config` and bundles it alongside the exe.
+`.github/workflows/release.yml` builds standalone executables with PyInstaller
+on a Windows/macOS/Linux matrix and publishes them to GitHub Releases
+(`NetLogger-Bridge-{Windows,macOS,Linux}.zip`) whenever a tag matching `v*` is
+pushed. Each zip bundles both the CLI (`netlogger_bridge`) and GUI
+(`netlogger_gui`, built with `--windowed` on Windows) executables plus a fresh
+`config.ini` from `--create-config`. This is the install path for
+non-technical users (see README "Easy install"). Linux builds install
+`python3-tk` via apt before running PyInstaller.
 
 ## Architecture
 

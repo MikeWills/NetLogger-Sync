@@ -11,3 +11,6 @@ netlogger_bridge.log
 build/
 dist/
 *.spec
+
+# Python bytecode cache
+__pycache__/

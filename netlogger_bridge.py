@@ -49,8 +49,7 @@ def load_config(config_path: str) -> configparser.ConfigParser:
     return cfg
 
 
-def create_sample_config():
-    sample = """\
+SAMPLE_CONFIG = """\
 [general]
 # Seconds between file polls
 poll_interval = 10
@@ -89,9 +88,27 @@ host = 127.0.0.1
 # TCP port (default 1100)
 port = 1100
 """
+
+
+def create_sample_config():
     with open("config.ini", "w", encoding="utf-8") as f:
-        f.write(sample)
+        f.write(SAMPLE_CONFIG)
     print("Sample config.ini created. Edit it and re-run.")
+
+
+def default_config() -> configparser.ConfigParser:
+    """Return a ConfigParser pre-populated with the sample config's defaults."""
+    cfg = configparser.ConfigParser()
+    cfg.read_string(SAMPLE_CONFIG)
+    return cfg
+
+
+def load_config_for_gui(config_path: str) -> configparser.ConfigParser:
+    """Load config_path over top of the sample defaults, without exiting if missing."""
+    cfg = default_config()
+    if Path(config_path).exists():
+        cfg.read(config_path, encoding="utf-8")
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +299,12 @@ def save_offset(state_file: str, offset: int):
 # Main loop
 # ---------------------------------------------------------------------------
 
-def run(config_path: str = "config.ini"):
+def run(config_path: str = "config.ini", stop_event=None):
+    """
+    Run the poll loop. If stop_event (a threading.Event) is given, the loop
+    exits once it's set instead of running forever — used by the GUI to
+    start/stop the bridge in a background thread.
+    """
     cfg = load_config(config_path)
     general = cfg["general"]
 
@@ -316,7 +338,7 @@ def run(config_path: str = "config.ini"):
     else:
         log.info(f"Resuming from byte offset {offset}")
 
-    while True:
+    while stop_event is None or not stop_event.is_set():
         records, offset = read_new_records(adi_path, offset)
 
         for raw in records:
@@ -340,7 +362,14 @@ def run(config_path: str = "config.ini"):
 
             save_offset(state_file, offset)
 
-        time.sleep(poll_interval)
+        if stop_event is not None:
+            if stop_event.wait(poll_interval):
+                break
+        else:
+            time.sleep(poll_interval)
+
+    if stop_event is not None:
+        log.info("Bridge stopped.")
 
 
 # ---------------------------------------------------------------------------

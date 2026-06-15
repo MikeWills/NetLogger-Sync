@@ -8,16 +8,23 @@ Either or both outputs can be enabled independently.
 
 ---
 
-## Easy install (Windows, no Python required)
+## Easy install (no Python required)
 
 1. Go to the [Releases](https://github.com/MikeWills/NetLogger-Sync/releases) page
-2. Download `NetLogger-Bridge-Windows.zip` from the latest release
-3. Extract it, then edit `config.ini` as described in [Setup](#setup) below
-4. Double-click `netlogger_bridge.exe` to run
+2. Download the zip for your platform from the latest release:
+   - `NetLogger-Bridge-Windows.zip`
+   - `NetLogger-Bridge-macOS.zip`
+   - `NetLogger-Bridge-Linux.zip`
+3. Extract it
+4. Run `netlogger_gui` (`netlogger_gui.exe` on Windows) — a window opens where
+   you can fill in your WaveLog/N3FJP details, click **Save Config**, then
+   **Start**. The log pane shows activity live.
+
+A command-line `netlogger_bridge` executable is also included for running
+without the GUI (e.g. as a background service — see below).
 
 This is the recommended option for club members who don't have Python installed.
-The sections below describe the Python-based setup, used for development or
-non-Windows platforms.
+The sections below describe the Python-based setup, used for development.
 
 ---
 
@@ -108,7 +115,13 @@ python netlogger_bridge.py
 
 # Custom config file
 python netlogger_bridge.py /path/to/myconfig.ini
+
+# GUI (config editor + start/stop + live log)
+python netlogger_gui.py
 ```
+
+The GUI requires Tk, which ships with most Python installs. On some Linux
+distros, install it separately: `sudo apt install python3-tk`.
 
 Logs go to console and `netlogger_bridge.log`.
 
