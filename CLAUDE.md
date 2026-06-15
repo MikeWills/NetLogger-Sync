@@ -18,7 +18,9 @@ via a `QueueHandler`. It also has a "Run automatically at login (background)"
 checkbox that registers/unregisters the headless CLI bridge (`netlogger_bridge`,
 pointed at the GUI's `config.ini`) with the OS scheduler — Task Scheduler
 (`schtasks`) on Windows, a `launchd` agent on macOS, or a `systemd --user`
-service on Linux.
+service on Linux. On Windows, `schtasks /create`/`/delete` can fail with
+"Access is denied" depending on local policy; `_run_schtasks` retries via a
+UAC-elevated `ShellExecuteExW("runas", ...)` in that case.
 
 Always update the readme with relavant changes. Always do a security check. Always review project for unused code an remove.
 

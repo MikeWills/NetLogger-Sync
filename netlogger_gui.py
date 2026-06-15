@@ -62,6 +62,66 @@ def is_autostart_enabled() -> bool:
         return False
 
 
+def _run_elevated(args: list[str]) -> int:
+    """Run `schtasks <args>` elevated via a UAC prompt. Returns the exit code."""
+    import ctypes
+    from ctypes import wintypes
+
+    class SHELLEXECUTEINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("fMask", ctypes.c_ulong),
+            ("hwnd", wintypes.HWND),
+            ("lpVerb", wintypes.LPCWSTR),
+            ("lpFile", wintypes.LPCWSTR),
+            ("lpParameters", wintypes.LPCWSTR),
+            ("lpDirectory", wintypes.LPCWSTR),
+            ("nShow", ctypes.c_int),
+            ("hInstApp", wintypes.HINSTANCE),
+            ("lpIDList", ctypes.c_void_p),
+            ("lpClass", wintypes.LPCWSTR),
+            ("hkeyClass", wintypes.HKEY),
+            ("dwHotKey", wintypes.DWORD),
+            ("hIconOrMonitor", wintypes.HANDLE),
+            ("hProcess", wintypes.HANDLE),
+        ]
+
+    SEE_MASK_NOCLOSEPROCESS = 0x00000040
+    SW_HIDE = 0
+
+    sei = SHELLEXECUTEINFO()
+    sei.cbSize = ctypes.sizeof(sei)
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS
+    sei.lpVerb = "runas"
+    sei.lpFile = "schtasks"
+    sei.lpParameters = subprocess.list2cmdline(args)
+    sei.nShow = SW_HIDE
+
+    if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(sei)):
+        err = ctypes.GetLastError()
+        if err == 1223:  # ERROR_CANCELLED
+            raise OSError("Administrator approval was declined.")
+        raise OSError(f"Elevation request failed (error {err}).")
+
+    ctypes.windll.kernel32.WaitForSingleObject(sei.hProcess, 30000)
+    exit_code = wintypes.DWORD()
+    ctypes.windll.kernel32.GetExitCodeProcess(sei.hProcess, ctypes.byref(exit_code))
+    ctypes.windll.kernel32.CloseHandle(sei.hProcess)
+    return exit_code.value
+
+
+def _run_schtasks(args: list[str]):
+    """Run schtasks, escalating to a UAC prompt if access is denied."""
+    result = subprocess.run(["schtasks", *args], capture_output=True, text=True)
+    if result.returncode == 0:
+        return
+    if "denied" not in result.stderr.lower():
+        raise OSError(result.stderr.strip() or f"schtasks exited with {result.returncode}")
+    exit_code = _run_elevated(args)
+    if exit_code != 0:
+        raise OSError(f"schtasks (elevated) exited with code {exit_code}")
+
+
 def enable_autostart():
     cmd = _cli_command()
     if sys.platform == "win32":
@@ -70,11 +130,8 @@ def enable_autostart():
         # wrapper script holding the real command and point /tr at that.
         cmd_line = " ".join(f'"{c}"' for c in cmd)
         WRAPPER_PATH.write_text(f"@echo off\n{cmd_line}\n", encoding="utf-8")
-        subprocess.run(
-            ["schtasks", "/create", "/tn", TASK_NAME, "/tr", f'"{WRAPPER_PATH}"',
-             "/sc", "onlogon", "/rl", "limited", "/f"],
-            check=True,
-        )
+        _run_schtasks(["/create", "/tn", TASK_NAME, "/tr", f'"{WRAPPER_PATH}"',
+                       "/sc", "onlogon", "/rl", "limited", "/f"])
     elif sys.platform == "darwin":
         args_xml = "\n".join(f"        <string>{c}</string>" for c in cmd)
         plist = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -117,7 +174,7 @@ WantedBy=default.target
 
 def disable_autostart():
     if sys.platform == "win32":
-        subprocess.run(["schtasks", "/delete", "/tn", TASK_NAME, "/f"], check=True)
+        _run_schtasks(["/delete", "/tn", TASK_NAME, "/f"])
         WRAPPER_PATH.unlink(missing_ok=True)
     elif sys.platform == "darwin":
         subprocess.run(["launchctl", "unload", "-w", str(PLIST_PATH)], check=False)
