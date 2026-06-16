@@ -299,7 +299,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("NetLogger Bridge")
-        self.geometry("640x960")
+        self.geometry("640x560")
 
         self.cfg = bridge.load_config_for_gui(CONFIG_ABS_PATH)
         self.stop_event = None
@@ -327,43 +327,45 @@ class App(tk.Tk):
         self._add_entry(general, "poll_interval", "Poll interval (seconds)")
         self._add_entry(general, "contacts_adi", "Contacts.adi path (blank = auto-detect)")
         self._add_entry(general, "state_file", "State file")
+        self._add_entry(general, "my_call", "My callsign")
 
-        wavelog = ttk.LabelFrame(self, text="WaveLog")
-        wavelog.pack(fill="x", padx=10, pady=5)
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill="x", padx=10, pady=5)
+
+        wavelog = ttk.Frame(notebook)
+        notebook.add(wavelog, text="WaveLog")
         self._add_checkbox(wavelog, "wavelog_enabled", "Enable WaveLog")
         self._add_entry(wavelog, "wavelog_url", "WaveLog URL")
         self._add_entry(wavelog, "wavelog_api_key", "API key")
         self._add_entry(wavelog, "wavelog_station_id", "Station ID")
 
-        n3fjp = ttk.LabelFrame(self, text="N3FJP AC Log")
-        n3fjp.pack(fill="x", padx=10, pady=5)
-        self._add_checkbox(n3fjp, "n3fjp_enabled", "Enable N3FJP")
+        n3fjp = ttk.Frame(notebook)
+        notebook.add(n3fjp, text="N3FJP")
+        self._add_checkbox(n3fjp, "n3fjp_enabled", "Enable N3FJP AC Log")
         self._add_entry(n3fjp, "n3fjp_host", "Host")
         self._add_entry(n3fjp, "n3fjp_port", "Port")
 
-        n1mm = ttk.LabelFrame(self, text="N1MM Logger+")
-        n1mm.pack(fill="x", padx=10, pady=5)
-        self._add_checkbox(n1mm, "n1mm_enabled", "Enable N1MM")
+        n1mm = ttk.Frame(notebook)
+        notebook.add(n1mm, text="N1MM")
+        self._add_checkbox(n1mm, "n1mm_enabled", "Enable N1MM Logger+")
         self._add_entry(n1mm, "n1mm_host", "Host")
         self._add_entry(n1mm, "n1mm_port", "Port")
-        self._add_entry(n1mm, "n1mm_my_call", "My callsign")
 
-        hrd = ttk.LabelFrame(self, text="Ham Radio Deluxe (HRD) Logbook")
-        hrd.pack(fill="x", padx=10, pady=5)
-        self._add_checkbox(hrd, "hrd_enabled", "Enable HRD")
+        hrd = ttk.Frame(notebook)
+        notebook.add(hrd, text="HRD")
+        self._add_checkbox(hrd, "hrd_enabled", "Enable Ham Radio Deluxe")
         self._add_entry(hrd, "hrd_host", "Host")
         self._add_entry(hrd, "hrd_port", "Port")
-        self._add_entry(hrd, "hrd_my_call", "My callsign")
 
-        log4om = ttk.LabelFrame(self, text="Log4OM v2")
-        log4om.pack(fill="x", padx=10, pady=5)
-        self._add_checkbox(log4om, "log4om_enabled", "Enable Log4OM")
+        log4om = ttk.Frame(notebook)
+        notebook.add(log4om, text="Log4OM")
+        self._add_checkbox(log4om, "log4om_enabled", "Enable Log4OM v2")
         self._add_entry(log4om, "log4om_host", "Host")
         self._add_entry(log4om, "log4om_port", "Port")
 
-        dxkeeper = ttk.LabelFrame(self, text="DXLab Suite DXKeeper")
-        dxkeeper.pack(fill="x", padx=10, pady=5)
-        self._add_checkbox(dxkeeper, "dxkeeper_enabled", "Enable DXKeeper")
+        dxkeeper = ttk.Frame(notebook)
+        notebook.add(dxkeeper, text="DXKeeper")
+        self._add_checkbox(dxkeeper, "dxkeeper_enabled", "Enable DXLab DXKeeper")
         self._add_entry(dxkeeper, "dxkeeper_host", "Host")
         self._add_entry(dxkeeper, "dxkeeper_port", "Port")
 
@@ -412,6 +414,9 @@ class App(tk.Tk):
         self.vars["poll_interval"].set(general.get("poll_interval", "10"))
         self.vars["contacts_adi"].set(general.get("contacts_adi", ""))
         self.vars["state_file"].set(general.get("state_file", "last_offset.txt"))
+        n1mm_call = self.cfg["n1mm"].get("my_call", "")
+        hrd_call = self.cfg["hrd"].get("my_call", "")
+        self.vars["my_call"].set(n1mm_call or hrd_call)
 
         wavelog = self.cfg["wavelog"]
         self.vars["wavelog_enabled"].set(wavelog.getboolean("enabled", fallback=False))
@@ -428,13 +433,11 @@ class App(tk.Tk):
         self.vars["n1mm_enabled"].set(n1mm.getboolean("enabled", fallback=False))
         self.vars["n1mm_host"].set(n1mm.get("host", "127.0.0.1"))
         self.vars["n1mm_port"].set(n1mm.get("port", "2237"))
-        self.vars["n1mm_my_call"].set(n1mm.get("my_call", ""))
 
         hrd = self.cfg["hrd"]
         self.vars["hrd_enabled"].set(hrd.getboolean("enabled", fallback=False))
         self.vars["hrd_host"].set(hrd.get("host", "127.0.0.1"))
         self.vars["hrd_port"].set(hrd.get("port", "12060"))
-        self.vars["hrd_my_call"].set(hrd.get("my_call", ""))
 
         log4om = self.cfg["log4om"]
         self.vars["log4om_enabled"].set(log4om.getboolean("enabled", fallback=False))
@@ -463,17 +466,19 @@ class App(tk.Tk):
         n3fjp["host"] = self.vars["n3fjp_host"].get()
         n3fjp["port"] = self.vars["n3fjp_port"].get()
 
+        my_call = self.vars["my_call"].get()
+
         n1mm = self.cfg["n1mm"]
         n1mm["enabled"] = "true" if self.vars["n1mm_enabled"].get() else "false"
         n1mm["host"] = self.vars["n1mm_host"].get()
         n1mm["port"] = self.vars["n1mm_port"].get()
-        n1mm["my_call"] = self.vars["n1mm_my_call"].get()
+        n1mm["my_call"] = my_call
 
         hrd = self.cfg["hrd"]
         hrd["enabled"] = "true" if self.vars["hrd_enabled"].get() else "false"
         hrd["host"] = self.vars["hrd_host"].get()
         hrd["port"] = self.vars["hrd_port"].get()
-        hrd["my_call"] = self.vars["hrd_my_call"].get()
+        hrd["my_call"] = my_call
 
         log4om = self.cfg["log4om"]
         log4om["enabled"] = "true" if self.vars["log4om_enabled"].get() else "false"
