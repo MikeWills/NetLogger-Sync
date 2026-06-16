@@ -15,6 +15,7 @@ import logging
 import sys
 import os
 import re
+import uuid
 import configparser
 from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape
@@ -510,23 +511,27 @@ def send_to_hrd(cfg: configparser.SectionProxy, adif: str) -> bool:
         '<?xml version="1.0" encoding="utf-8"?>'
         '<contactinfo>'
         '<app>N1MM</app>'
+        f'<contestname></contestname>'
+        f'<contestnr>0</contestnr>'
         f'<timestamp>{_xml_escape(ts)}</timestamp>'
         f'<mycall>{_xml_escape(my_call)}</mycall>'
-        f'<call>{_xml_escape(call)}</call>'
         f'<band>{_xml_escape(band_mhz)}</band>'
         f'<rxfreq>{n1mm_freq}</rxfreq>'
         f'<txfreq>{n1mm_freq}</txfreq>'
+        f'<operator>{_xml_escape(my_call)}</operator>'
         f'<mode>{_xml_escape(mode)}</mode>'
+        f'<call>{_xml_escape(call)}</call>'
+        '<countryprefix></countryprefix>'
+        '<wpxprefix></wpxprefix>'
+        '<stationprefix></stationprefix>'
+        '<continent></continent>'
         f'<snt>{_xml_escape(rst_sent)}</snt>'
-        f'<rcv>{_xml_escape(rst_rcvd)}</rcv>'
-        '<contestname></contestname>'
-        '<contestnr>0</contestnr>'
-        '<operator></operator>'
         '<sntnr>0</sntnr>'
+        f'<rcv>{_xml_escape(rst_rcvd)}</rcv>'
         '<rcvnr>0</rcvnr>'
         '<gridsquare></gridsquare>'
         '<exchange1></exchange1>'
-        '<section></section>'
+        '<sect></sect>'
         '<comment></comment>'
         '<qth></qth>'
         '<name></name>'
@@ -540,11 +545,18 @@ def send_to_hrd(cfg: configparser.SectionProxy, adif: str) -> bool:
         '<ismultiplier3>0</ismultiplier3>'
         '<points>1</points>'
         '<radionr>1</radionr>'
+        '<run1run2>0</run1run2>'
+        '<RoverLocation></RoverLocation>'
+        '<RadioInterfaced>0</RadioInterfaced>'
+        '<NetBiosName></NetBiosName>'
         '<IsOriginal>True</IsOriginal>'
         '<IsRunQSO>0</IsRunQSO>'
+        f'<StationName>{_xml_escape(my_call)}</StationName>'
+        f'<ID>{{{uuid.uuid4()}}}</ID>'
         '<IsClaimedQso>1</IsClaimedQso>'
         '</contactinfo>'
     )
+    log.debug(f"HRD XML: {xml}")
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
