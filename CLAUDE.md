@@ -14,8 +14,11 @@ Single-file Python bridge (`netlogger_bridge.py`) that tails NetLogger's `Contac
 ADIF log file for newly appended QSO records and forwards each one to:
 - **WaveLog** via HTTP REST API (`POST {url}/api/qso`)
 - **N3FJP AC Log** via a raw TCP API (`<CMD><ADDADIFRECORD><VALUE>...</CMD>`)
+- **Ham Radio Deluxe (HRD) Logbook** via N1MM-compatible UDP XML ContactInfo on port 12060
+- **Log4OM v2** via UDP inbound ADIF (plain ADIF record datagram, user-configured port)
+- **DXLab Suite DXKeeper** via TCP `externallog` command on port 52001
 
-Either or both outputs can be enabled independently via `config.ini`.
+Any combination of outputs can be enabled independently via `config.ini`.
 
 `netlogger_gui.py` is a Tkinter front-end over the same module: it edits
 `config.ini` via form fields and runs `bridge.run()` in a background thread
@@ -93,7 +96,7 @@ The script is organized as a sequence of self-contained sections, run via a sing
 polling loop in `run()`:
 
 1. **Config** (`load_config`, `create_sample_config`) — `configparser`-based, sections
-   `[general]`, `[wavelog]`, `[n3fjp]`.
+   `[general]`, `[wavelog]`, `[n3fjp]`, `[hrd]`, `[log4om]`, `[dxkeeper]`.
 2. **ADI file location** (`find_adi_file`, `ADI_PATHS`) — locates NetLogger's
    `Contacts.adi`, auto-detecting an OS-specific default path if `contacts_adi` is blank.
 3. **ADIF file tailer** (`read_new_records`, `normalize_adif`, `extract_field`) —
@@ -106,8 +109,9 @@ polling loop in `run()`:
    separators followed by `<EOR>` — matching the exact format N3FJP's
    `ADDADIFRECORD` API expects. `extract_field` does a simple regex pull of a field
    value (used only for log messages).
-4. **Output senders** (`send_to_wavelog`, `send_to_n3fjp`) — each takes a built ADIF
-   record string and pushes it to one destination, returning a bool success flag.
+4. **Output senders** (`send_to_wavelog`, `send_to_n3fjp`, `send_to_hrd`,
+   `send_to_log4om`, `send_to_dxkeeper`) — each takes a built ADIF record string
+   and pushes it to one destination, returning a bool success flag.
    `send_to_wavelog` treats HTTP 200/201 with `status: created` and `adif_count > 0`
    as success (WaveLog returns 400 `status: abort` for duplicate QSOs — expected
    when replaying already-logged contacts). `send_to_n3fjp` sends
@@ -115,6 +119,14 @@ polling loop in `run()`:
    over TCP — ADDADIFRECORD writes directly to N3FJP's log file but doesn't refresh
    its on-screen list, and CHECKLOG forces that reload. ADDADIFRECORD itself has no
    documented response, so a timeout/no-response is normal, not an error.
+   `send_to_hrd` builds an N1MM-compatible ContactInfo XML packet (UDP) from the
+   ADIF record's fields, using `_BAND_TO_MHZ` to map ADIF band to MHz and
+   `_xml_escape` to sanitize values; HRD's QSO Forwarding must be configured with
+   N1MM as the source on the matching port. `send_to_log4om` sends the ADIF record
+   as a raw UDP datagram to Log4OM's inbound ADIF service. `send_to_dxkeeper`
+   builds a DXLab ADIF-encoded TCP message
+   (`<command:11>externallog<parameters:N><ExternalLogADIF:M>[adif fields]`)
+   and sends it to DXKeeper on port 52001.
 5. **State persistence** (`load_offset`, `save_offset`) — the byte offset into
    `Contacts.adi` is persisted to `state_file` (default `last_offset.txt`) after each
    record is processed, so restarts resume correctly. A missing/invalid state file
@@ -135,8 +147,9 @@ polling loop in `run()`:
   arbitrary working directory.
 - The tailer operates on raw bytes/text — it does not parse NetLogger's ADIF fields
   beyond pulling `Call`/`Band`/`Mode` for log messages via `extract_field`. Records
-  are forwarded as-is (with `<EOR>` re-appended), so any fields NetLogger writes are
-  passed through to WaveLog/N3FJP unchanged.
+  are forwarded as-is (with `<EOR>` re-appended) to WaveLog, N3FJP, Log4OM, and
+  DXKeeper. The HRD sender additionally extracts `FREQ`, `QSO_DATE`, `TIME_ON`,
+  `RST_SENT`, and `RST_RCVD` to build the N1MM XML payload.
 - `read_new_records` only advances the offset past *complete* records (i.e. those
   followed by `<eor>`); a partially-written trailing record is left for the next poll.
 - Logging goes to both stdout and `netlogger_bridge.log` (set up at module import time

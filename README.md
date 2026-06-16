@@ -3,8 +3,11 @@
 Tails NetLogger's `Contacts.adi` file and forwards new QSOs in real-time to:
 - **WaveLog** — via HTTP REST API
 - **N3FJP AC Log** — via its TCP server
+- **Ham Radio Deluxe (HRD) Logbook** — via N1MM-compatible UDP XML
+- **Log4OM v2** — via UDP inbound ADIF
+- **DXLab Suite DXKeeper** — via TCP `externallog` command
 
-Either or both outputs can be enabled independently.
+Any combination of outputs can be enabled independently.
 
 ---
 
@@ -65,6 +68,22 @@ station_id = 1
 enabled = true
 host = 127.0.0.1
 port = 1100
+
+[hrd]
+enabled = false
+host = 127.0.0.1
+port = 12060
+my_call = W1AW
+
+[log4om]
+enabled = false
+host = 127.0.0.1
+port = 2237
+
+[dxkeeper]
+enabled = false
+host = 127.0.0.1
+port = 52001
 ```
 
 ### 2. NetLogger Contacts.adi auto-detection
@@ -104,6 +123,45 @@ API reference: https://docs.wavelog.org/developer/api/
 > on any platform, but N3FJP must be reachable over the network.
 
 API reference: http://www.n3fjp.com/help/api.html
+
+### 5. Ham Radio Deluxe (HRD) setup
+
+The bridge sends QSOs using N1MM-compatible UDP XML, which HRD Logbook natively accepts.
+
+1. In HRD Logbook, go to **Tools → QSO Forwarding**
+2. Enable the **N1MM** source and set the port (default: `12060`)
+3. Set `host`, `port`, and `my_call` (your station callsign) in `config.ini`
+4. Set `enabled = true`
+
+> **Note:** HRD Logbook is Windows-only commercial software. The bridge can
+> run on any platform as long as HRD is reachable over the network.
+
+### 6. Log4OM v2 setup
+
+The bridge sends QSOs as plain ADIF records over UDP to Log4OM's inbound ADIF service.
+
+1. In Log4OM, go to **Communicator → Inbound Connections**
+2. Click **Add**, select type **ADIF**, and enter a port number (e.g. `2237`)
+3. Click the **+** button to activate the listener
+4. Set `host` and `port` in `config.ini` to match
+5. Set `enabled = true`
+
+> **Note:** The port is freely configurable — pick any unused port and make
+> sure Log4OM's inbound connection uses the same number.
+
+API reference: Log4OM forum — Communicator > Inbound Connections > ADIF
+
+### 7. DXLab Suite DXKeeper setup
+
+The bridge connects to DXKeeper's TCP port and issues an `externallog` command.
+
+1. Ensure DXKeeper is running
+2. Note the base port: in DXKeeper go to **Config → Ports**; DXKeeper listens on
+   **base port + 1** (default base is `52000`, so DXKeeper uses `52001`)
+3. Set `host` and `port` in `config.ini`
+4. Set `enabled = true`
+
+API reference: https://www.dxlabsuite.com/Interoperation.htm
 
 ---
 

@@ -287,7 +287,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("NetLogger Bridge")
-        self.geometry("640x560")
+        self.geometry("640x820")
 
         self.cfg = bridge.load_config_for_gui(CONFIG_ABS_PATH)
         self.stop_event = None
@@ -328,6 +328,25 @@ class App(tk.Tk):
         self._add_checkbox(n3fjp, "n3fjp_enabled", "Enable N3FJP")
         self._add_entry(n3fjp, "n3fjp_host", "Host")
         self._add_entry(n3fjp, "n3fjp_port", "Port")
+
+        hrd = ttk.LabelFrame(self, text="Ham Radio Deluxe (HRD) Logbook")
+        hrd.pack(fill="x", padx=10, pady=5)
+        self._add_checkbox(hrd, "hrd_enabled", "Enable HRD")
+        self._add_entry(hrd, "hrd_host", "Host")
+        self._add_entry(hrd, "hrd_port", "Port")
+        self._add_entry(hrd, "hrd_my_call", "My callsign")
+
+        log4om = ttk.LabelFrame(self, text="Log4OM v2")
+        log4om.pack(fill="x", padx=10, pady=5)
+        self._add_checkbox(log4om, "log4om_enabled", "Enable Log4OM")
+        self._add_entry(log4om, "log4om_host", "Host")
+        self._add_entry(log4om, "log4om_port", "Port")
+
+        dxkeeper = ttk.LabelFrame(self, text="DXLab Suite DXKeeper")
+        dxkeeper.pack(fill="x", padx=10, pady=5)
+        self._add_checkbox(dxkeeper, "dxkeeper_enabled", "Enable DXKeeper")
+        self._add_entry(dxkeeper, "dxkeeper_host", "Host")
+        self._add_entry(dxkeeper, "dxkeeper_port", "Port")
 
         buttons = ttk.Frame(self)
         buttons.pack(fill="x", padx=10, pady=5)
@@ -386,6 +405,22 @@ class App(tk.Tk):
         self.vars["n3fjp_host"].set(n3fjp.get("host", "127.0.0.1"))
         self.vars["n3fjp_port"].set(n3fjp.get("port", "1100"))
 
+        hrd = self.cfg["hrd"]
+        self.vars["hrd_enabled"].set(hrd.getboolean("enabled", fallback=False))
+        self.vars["hrd_host"].set(hrd.get("host", "127.0.0.1"))
+        self.vars["hrd_port"].set(hrd.get("port", "12060"))
+        self.vars["hrd_my_call"].set(hrd.get("my_call", ""))
+
+        log4om = self.cfg["log4om"]
+        self.vars["log4om_enabled"].set(log4om.getboolean("enabled", fallback=False))
+        self.vars["log4om_host"].set(log4om.get("host", "127.0.0.1"))
+        self.vars["log4om_port"].set(log4om.get("port", "2237"))
+
+        dxkeeper = self.cfg["dxkeeper"]
+        self.vars["dxkeeper_enabled"].set(dxkeeper.getboolean("enabled", fallback=False))
+        self.vars["dxkeeper_host"].set(dxkeeper.get("host", "127.0.0.1"))
+        self.vars["dxkeeper_port"].set(dxkeeper.get("port", "52001"))
+
     def _save_config(self):
         general = self.cfg["general"]
         general["poll_interval"] = self.vars["poll_interval"].get()
@@ -403,6 +438,22 @@ class App(tk.Tk):
         n3fjp["host"] = self.vars["n3fjp_host"].get()
         n3fjp["port"] = self.vars["n3fjp_port"].get()
 
+        hrd = self.cfg["hrd"]
+        hrd["enabled"] = "true" if self.vars["hrd_enabled"].get() else "false"
+        hrd["host"] = self.vars["hrd_host"].get()
+        hrd["port"] = self.vars["hrd_port"].get()
+        hrd["my_call"] = self.vars["hrd_my_call"].get()
+
+        log4om = self.cfg["log4om"]
+        log4om["enabled"] = "true" if self.vars["log4om_enabled"].get() else "false"
+        log4om["host"] = self.vars["log4om_host"].get()
+        log4om["port"] = self.vars["log4om_port"].get()
+
+        dxkeeper = self.cfg["dxkeeper"]
+        dxkeeper["enabled"] = "true" if self.vars["dxkeeper_enabled"].get() else "false"
+        dxkeeper["host"] = self.vars["dxkeeper_host"].get()
+        dxkeeper["port"] = self.vars["dxkeeper_port"].get()
+
         with open(CONFIG_ABS_PATH, "w", encoding="utf-8") as f:
             self.cfg.write(f)
 
@@ -415,8 +466,14 @@ class App(tk.Tk):
             self.start_button.config(state="disabled")
             self.status_label.config(text="Stopping...")
         else:
-            if not self.vars["wavelog_enabled"].get() and not self.vars["n3fjp_enabled"].get():
-                messagebox.showerror("NetLogger Bridge", "Enable WaveLog and/or N3FJP first.")
+            if not any([
+                self.vars["wavelog_enabled"].get(),
+                self.vars["n3fjp_enabled"].get(),
+                self.vars["hrd_enabled"].get(),
+                self.vars["log4om_enabled"].get(),
+                self.vars["dxkeeper_enabled"].get(),
+            ]):
+                messagebox.showerror("NetLogger Bridge", "Enable at least one output first.")
                 return
 
             pid = get_running_bridge_pid()

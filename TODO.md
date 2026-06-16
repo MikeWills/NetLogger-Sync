@@ -2,51 +2,43 @@
 
 ## Add N1MM Logger+ support
 
-- [ ] Research how N1MM Logger+ accepts incoming contact data (UDP broadcast
-      XML on port 12060 is used for radio/contact info between programs —
-      confirm whether it can be used to *add* a QSO, or whether N1MM only
-      consumes ADIF via file import).
-- [ ] Add a `send_to_n1mm()` sender in `netlogger_bridge.py` following the
-      pattern of `send_to_n3fjp()`.
-- [ ] Add `[n1mm]` section to `SAMPLE_CONFIG` / `config.ini` (enabled, host,
-      port, and whatever else the chosen integration method needs).
-- [ ] Add N1MM fields to the GUI (`netlogger_gui.py`) — enable checkbox +
-      connection settings, following the WaveLog/N3FJP `LabelFrame` pattern.
-- [ ] Update README.md setup instructions and CLAUDE.md architecture notes.
+**Research finding: N1MM Logger+ has no inbound QSO API.**
+
+N1MM's networking interface is outbound-only — it broadcasts `ContactInfo`,
+`ContactReplace`, and `ContactDelete` XML packets via UDP so that *other*
+programs can react to QSOs logged in N1MM. There is no documented mechanism
+for an external program to *submit* a QSO to N1MM over the network. The only
+inbound control is `Radio_SetFrequency` (frequency change only).
+
+Support for N1MM as an output target is not feasible without N1MM adding an
+inbound QSO API. No action items remain.
+
+Reference: https://n1mmwp.hamdocs.com/appendices/external-udp-broadcasts/
 
 ## Add Ham Radio Deluxe (HRD) Logbook support
 
-- [ ] Research HRD Logbook's API for adding QSOs (TCP/DDE interface — confirm
-      command format, default port, and response handling, similar to how
-      N3FJP's `ADDADIFRECORD` was reverse-engineered).
-- [ ] Add a `send_to_hrd()` sender in `netlogger_bridge.py`.
-- [ ] Add `[hrd]` section to `SAMPLE_CONFIG` / `config.ini` (enabled, host,
-      port).
-- [ ] Add HRD fields to the GUI, following the WaveLog/N3FJP `LabelFrame`
-      pattern.
-- [ ] Update README.md setup instructions and CLAUDE.md architecture notes.
+- [x] Research HRD Logbook's API — HRD accepts N1MM-compatible UDP XML
+      ContactInfo packets on port 12060 (Tools > QSO Forwarding > N1MM).
+- [x] Add `send_to_hrd()` sender in `netlogger_bridge.py`.
+- [x] Add `[hrd]` section to `SAMPLE_CONFIG` / `config.ini` (enabled, host,
+      port, my_call).
+- [x] Add HRD fields to the GUI, following the WaveLog/N3FJP `LabelFrame` pattern.
+- [x] Update README.md setup instructions and CLAUDE.md architecture notes.
 
 ## Add Log4OM support
 
-- [ ] Research Log4OM's local TCP/UDP command API for adding QSOs (confirm
-      command format, default port, and response handling, similar to how
-      N3FJP's `ADDADIFRECORD` was reverse-engineered).
-- [ ] Add a `send_to_log4om()` sender in `netlogger_bridge.py`.
-- [ ] Add `[log4om]` section to `SAMPLE_CONFIG` / `config.ini` (enabled, host,
-      port).
-- [ ] Add Log4OM fields to the GUI, following the WaveLog/N3FJP `LabelFrame`
-      pattern.
-- [ ] Update README.md setup instructions and CLAUDE.md architecture notes.
+- [x] Research Log4OM's UDP inbound ADIF service — sends plain ADIF record as
+      a UDP datagram to a user-configured port (Communicator > Inbound Connections).
+- [x] Add `send_to_log4om()` sender in `netlogger_bridge.py`.
+- [x] Add `[log4om]` section to `SAMPLE_CONFIG` / `config.ini` (enabled, host, port).
+- [x] Add Log4OM fields to the GUI, following the WaveLog/N3FJP `LabelFrame` pattern.
+- [x] Update README.md setup instructions and CLAUDE.md architecture notes.
 
 ## Add DXLab Suite (DXKeeper) support
 
-- [ ] Research DXKeeper's TCP command interface for adding QSOs (DXLab
-      Suite's commander API — confirm command format, default port, and
-      response handling, similar to how N3FJP's `ADDADIFRECORD` was
-      reverse-engineered).
-- [ ] Add a `send_to_dxkeeper()` sender in `netlogger_bridge.py`.
-- [ ] Add `[dxkeeper]` section to `SAMPLE_CONFIG` / `config.ini` (enabled,
-      host, port).
-- [ ] Add DXKeeper fields to the GUI, following the WaveLog/N3FJP
-      `LabelFrame` pattern.
-- [ ] Update README.md setup instructions and CLAUDE.md architecture notes.
+- [x] Research DXKeeper's TCP `externallog` command — TCP on port 52001
+      (base port 52000 + 1); message format uses DXLab ADIF field encoding.
+- [x] Add `send_to_dxkeeper()` sender in `netlogger_bridge.py`.
+- [x] Add `[dxkeeper]` section to `SAMPLE_CONFIG` / `config.ini` (enabled, host, port).
+- [x] Add DXKeeper fields to the GUI, following the WaveLog/N3FJP `LabelFrame` pattern.
+- [x] Update README.md setup instructions and CLAUDE.md architecture notes.

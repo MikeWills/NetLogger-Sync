@@ -15,6 +15,7 @@ import os
 import re
 import configparser
 from pathlib import Path
+from xml.sax.saxutils import escape as _xml_escape
 
 try:
     import requests
@@ -106,6 +107,42 @@ host = 127.0.0.1
 
 # TCP port (default 1100)
 port = 1100
+
+[hrd]
+# Set enabled = true to forward contacts to Ham Radio Deluxe (HRD) Logbook
+# In HRD: Tools > QSO Forwarding, enable N1MM source, set port to match below
+enabled = false
+
+# Hostname or IP of the machine running HRD Logbook
+host = 127.0.0.1
+
+# UDP port (must match HRD's QSO Forwarding N1MM port; default 12060)
+port = 12060
+
+# Your station callsign — included in the N1MM-compatible XML packet sent to HRD
+my_call =
+
+[log4om]
+# Set enabled = true to forward contacts to Log4OM v2
+# In Log4OM: Communicator > Inbound Connections > Add, type ADIF, port must match below
+enabled = false
+
+# Hostname or IP of the machine running Log4OM
+host = 127.0.0.1
+
+# UDP port (must match the Log4OM inbound ADIF connection port you configured)
+port = 2237
+
+[dxkeeper]
+# Set enabled = true to forward contacts to DXLab Suite DXKeeper
+# DXKeeper must be running; its TCP base port is set in DXKeeper > Config > Ports
+enabled = false
+
+# Hostname or IP of the machine running DXKeeper
+host = 127.0.0.1
+
+# TCP port (DXKeeper default: 52001, which is base port 52000 + 1)
+port = 52001
 """
 
 
@@ -300,6 +337,166 @@ def send_to_n3fjp(host: str, port: int, adif: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Ham Radio Deluxe (HRD)
+# ---------------------------------------------------------------------------
+
+# ADIF BAND → nominal lower-edge MHz string for N1MM ContactInfo XML <band>
+_BAND_TO_MHZ = {
+    "2190M": "0.137", "630M": "0.475", "160M": "1.8", "80M": "3.5",
+    "60M": "5", "40M": "7", "30M": "10", "20M": "14", "17M": "18",
+    "15M": "21", "12M": "24", "10M": "28", "6M": "50", "4M": "70",
+    "2M": "144", "1.25M": "222", "70CM": "432", "33CM": "902",
+    "23CM": "1240", "13CM": "2300",
+}
+
+
+def send_to_hrd(cfg: configparser.SectionProxy, adif: str) -> bool:
+    """
+    Send QSO to HRD Logbook via N1MM-compatible UDP XML ContactInfo packet.
+    HRD listens for N1MM UDP broadcasts: Tools > QSO Forwarding > N1MM.
+    Reference: https://n1mmwp.hamdocs.com/appendices/external-udp-broadcasts/
+    """
+    host    = cfg.get("host", "127.0.0.1")
+    port    = cfg.getint("port", fallback=12060)
+    my_call = cfg.get("my_call", "")
+
+    call     = extract_field(adif, "CALL")
+    band     = extract_field(adif, "BAND")
+    mode     = extract_field(adif, "MODE")
+    freq     = extract_field(adif, "FREQ")
+    qso_date = extract_field(adif, "QSO_DATE")
+    time_on  = extract_field(adif, "TIME_ON")
+    rst_sent = extract_field(adif, "RST_SENT")
+    rst_sent = rst_sent if rst_sent != "?" else "599"
+    rst_rcvd = extract_field(adif, "RST_RCVD")
+    rst_rcvd = rst_rcvd if rst_rcvd != "?" else "599"
+
+    # Timestamp: YYYY-MM-DD HH:MM:SS
+    if len(qso_date) == 8 and len(time_on) >= 6:
+        ts = (f"{qso_date[:4]}-{qso_date[4:6]}-{qso_date[6:8]} "
+              f"{time_on[:2]}:{time_on[2:4]}:{time_on[4:6]}")
+    else:
+        ts = ""
+
+    # Band in MHz (N1MM <band> format)
+    band_mhz = _BAND_TO_MHZ.get(band.upper(), "14")
+
+    # Frequency in N1MM units (10 Hz resolution: MHz × 100 000)
+    try:
+        n1mm_freq = int(float(freq) * 100_000) if freq and freq != "?" else int(float(band_mhz) * 100_000)
+    except ValueError:
+        n1mm_freq = int(float(band_mhz) * 100_000)
+
+    xml = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<contactinfo>'
+        '<app>N1MM</app>'
+        f'<timestamp>{_xml_escape(ts)}</timestamp>'
+        f'<mycall>{_xml_escape(my_call)}</mycall>'
+        f'<call>{_xml_escape(call)}</call>'
+        f'<band>{_xml_escape(band_mhz)}</band>'
+        f'<rxfreq>{n1mm_freq}</rxfreq>'
+        f'<txfreq>{n1mm_freq}</txfreq>'
+        f'<mode>{_xml_escape(mode)}</mode>'
+        f'<snt>{_xml_escape(rst_sent)}</snt>'
+        f'<rcv>{_xml_escape(rst_rcvd)}</rcv>'
+        '<contestname></contestname>'
+        '<contestnr>0</contestnr>'
+        '<operator></operator>'
+        '<sntnr>0</sntnr>'
+        '<rcvnr>0</rcvnr>'
+        '<gridsquare></gridsquare>'
+        '<exchange1></exchange1>'
+        '<section></section>'
+        '<comment></comment>'
+        '<qth></qth>'
+        '<name></name>'
+        '<power></power>'
+        '<misctext></misctext>'
+        '<zone>0</zone>'
+        '<prec></prec>'
+        '<ck>0</ck>'
+        '<ismultiplier1>0</ismultiplier1>'
+        '<ismultiplier2>0</ismultiplier2>'
+        '<ismultiplier3>0</ismultiplier3>'
+        '<points>1</points>'
+        '<radionr>1</radionr>'
+        '<IsOriginal>True</IsOriginal>'
+        '<IsRunQSO>0</IsRunQSO>'
+        '<IsClaimedQso>1</IsClaimedQso>'
+        '</contactinfo>'
+    )
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.sendto(xml.encode("utf-8"), (host, port))
+        return True
+    except (socket.error, OSError) as e:
+        log.error(f"HRD UDP error ({host}:{port}): {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Log4OM
+# ---------------------------------------------------------------------------
+
+def send_to_log4om(host: str, port: int, adif: str) -> bool:
+    """
+    Send ADIF QSO record to Log4OM v2 via UDP inbound ADIF service.
+    Configure Log4OM: Communicator > Inbound Connections > Add, type ADIF,
+    port must match the [log4om] port in config.ini.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.sendto(adif.encode("utf-8"), (host, port))
+        return True
+    except (socket.error, OSError) as e:
+        log.error(f"Log4OM UDP error ({host}:{port}): {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# DXLab Suite DXKeeper
+# ---------------------------------------------------------------------------
+
+def send_to_dxkeeper(host: str, port: int, adif: str) -> bool:
+    """
+    Send QSO to DXKeeper via its TCP externallog command.
+    DXKeeper listens on base_port + 1 (default 52001).
+    Message format uses DXLab ADIF field encoding:
+      <command:11>externallog<parameters:N><ExternalLogADIF:M>[adif fields]
+    Reference: https://www.dxlabsuite.com/Interoperation.htm
+    """
+    # DXKeeper expects ADIF fields without the trailing <EOR>
+    adif_fields = adif
+    if adif_fields.upper().endswith("<EOR>"):
+        adif_fields = adif_fields[:-5].rstrip()
+
+    M      = len(adif_fields.encode("utf-8"))
+    params = f"<ExternalLogADIF:{M}>{adif_fields}"
+    N      = len(params.encode("utf-8"))
+    message = f"<command:11>externallog<parameters:{N}>{params}"
+
+    try:
+        with socket.create_connection((host, port), timeout=5) as sock:
+            sock.sendall(message.encode("utf-8"))
+            sock.settimeout(2)
+            try:
+                response = sock.recv(1024).decode("utf-8", errors="replace")
+                if response:
+                    log.debug(f"DXKeeper response: {response.strip()}")
+                    if "error" in response.lower():
+                        log.error(f"DXKeeper rejected record: {response.strip()}")
+                        return False
+            except socket.timeout:
+                log.debug("DXKeeper sent no response within 2s (normal)")
+        return True
+    except (socket.error, OSError) as e:
+        log.error(f"DXKeeper TCP error ({host}:{port}): {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
 # State persistence (byte offset)
 # ---------------------------------------------------------------------------
 
@@ -331,17 +528,23 @@ def run(config_path: str = "config.ini", stop_event=None):
     state_file     = str(resolve_path(general.get("state_file", "last_offset.txt")))
     adi_path       = find_adi_file(general.get("contacts_adi", ""))
 
-    wavelog_enabled = cfg.getboolean("wavelog", "enabled", fallback=False)
-    n3fjp_enabled   = cfg.getboolean("n3fjp",   "enabled", fallback=False)
+    wavelog_enabled  = cfg.getboolean("wavelog",  "enabled", fallback=False)
+    n3fjp_enabled    = cfg.getboolean("n3fjp",    "enabled", fallback=False)
+    hrd_enabled      = cfg.getboolean("hrd",      "enabled", fallback=False)
+    log4om_enabled   = cfg.getboolean("log4om",   "enabled", fallback=False)
+    dxkeeper_enabled = cfg.getboolean("dxkeeper", "enabled", fallback=False)
 
-    if not wavelog_enabled and not n3fjp_enabled:
-        log.error("No outputs enabled. Set enabled = true in [wavelog] and/or [n3fjp].")
+    if not any([wavelog_enabled, n3fjp_enabled, hrd_enabled, log4om_enabled, dxkeeper_enabled]):
+        log.error("No outputs enabled. Set enabled = true in at least one output section.")
         sys.exit(1)
 
     log.info(f"NetLogger Bridge starting — polling every {poll_interval}s")
-    log.info(f"File    : {adi_path}")
-    log.info(f"WaveLog : {'enabled' if wavelog_enabled else 'disabled'}")
-    log.info(f"N3FJP   : {'enabled' if n3fjp_enabled else 'disabled'}")
+    log.info(f"File     : {adi_path}")
+    log.info(f"WaveLog  : {'enabled' if wavelog_enabled else 'disabled'}")
+    log.info(f"N3FJP    : {'enabled' if n3fjp_enabled else 'disabled'}")
+    log.info(f"HRD      : {'enabled' if hrd_enabled else 'disabled'}")
+    log.info(f"Log4OM   : {'enabled' if log4om_enabled else 'disabled'}")
+    log.info(f"DXKeeper : {'enabled' if dxkeeper_enabled else 'disabled'}")
 
     offset = load_offset(state_file)
 
@@ -374,13 +577,29 @@ def run(config_path: str = "config.ini", stop_event=None):
 
                 if wavelog_enabled:
                     ok = send_to_wavelog(cfg["wavelog"], adif)
-                    log.info(f"  WaveLog : {'OK' if ok else 'FAILED'}")
+                    log.info(f"  WaveLog  : {'OK' if ok else 'FAILED'}")
 
                 if n3fjp_enabled:
                     host = cfg["n3fjp"].get("host", "127.0.0.1")
                     port = cfg["n3fjp"].getint("port", fallback=1100)
                     ok   = send_to_n3fjp(host, port, adif)
-                    log.info(f"  N3FJP   : {'OK' if ok else 'FAILED'}")
+                    log.info(f"  N3FJP    : {'OK' if ok else 'FAILED'}")
+
+                if hrd_enabled:
+                    ok = send_to_hrd(cfg["hrd"], adif)
+                    log.info(f"  HRD      : {'OK' if ok else 'FAILED'}")
+
+                if log4om_enabled:
+                    host = cfg["log4om"].get("host", "127.0.0.1")
+                    port = cfg["log4om"].getint("port", fallback=2237)
+                    ok   = send_to_log4om(host, port, adif)
+                    log.info(f"  Log4OM   : {'OK' if ok else 'FAILED'}")
+
+                if dxkeeper_enabled:
+                    host = cfg["dxkeeper"].get("host", "127.0.0.1")
+                    port = cfg["dxkeeper"].getint("port", fallback=52001)
+                    ok   = send_to_dxkeeper(host, port, adif)
+                    log.info(f"  DXKeeper : {'OK' if ok else 'FAILED'}")
 
                 save_offset(state_file, offset)
 
