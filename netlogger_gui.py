@@ -12,6 +12,7 @@ Python installs; on some Linux distros install the 'python3-tk' package).
 import logging
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -272,6 +273,17 @@ def get_running_bridge_pid() -> int | None:
     return None
 
 
+def _stop_bridge_process(pid: int):
+    """Terminate a running bridge process by PID."""
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 class QueueHandler(logging.Handler):
     """Logging handler that pushes formatted records onto a queue for the GUI thread."""
 
@@ -480,8 +492,13 @@ class App(tk.Tk):
     # Bridge control
     # ------------------------------------------------------------------
     def _toggle_run(self):
-        if self.worker and self.worker.is_alive():
-            self.stop_event.set()
+        if self.start_button.cget("text") == "Stop":
+            if self.worker and self.worker.is_alive():
+                self.stop_event.set()
+            else:
+                pid = get_running_bridge_pid()
+                if pid is not None:
+                    _stop_bridge_process(pid)
             self.start_button.config(state="disabled")
             self.status_label.config(text="Stopping...")
         else:
@@ -534,15 +551,25 @@ class App(tk.Tk):
         if self.worker and self.worker.is_alive():
             self.after(500, self._watch_worker)
         else:
-            self.start_button.config(text="Start", state="normal")
-            self.status_label.config(text="Stopped")
+            if get_running_bridge_pid() is None:
+                self.start_button.config(text="Start", state="normal")
+                self.status_label.config(text="Stopped")
+            # If an external process is still alive, _poll_process_status will
+            # set the button to "Stop" on its next tick.
 
     def _poll_process_status(self):
         pid = get_running_bridge_pid()
+        no_thread = not (self.worker and self.worker.is_alive())
         if pid is not None:
             self.process_label.config(text=f"Bridge process: running (PID {pid})")
+            if no_thread:
+                self.start_button.config(text="Stop", state="normal")
+                self.status_label.config(text="Running")
         else:
             self.process_label.config(text="Bridge process: not running")
+            if no_thread:
+                self.start_button.config(text="Start", state="normal")
+                self.status_label.config(text="Stopped")
         self.after(2000, self._poll_process_status)
 
     # ------------------------------------------------------------------
