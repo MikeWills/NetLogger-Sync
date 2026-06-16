@@ -7,6 +7,8 @@ to WaveLog (via HTTP API) and/or N3FJP AC Log (via TCP API).
 Cross-platform: Windows, macOS, Linux
 """
 
+import datetime
+import struct
 import time
 import socket
 import logging
@@ -107,6 +109,21 @@ host = 127.0.0.1
 
 # TCP port (default 1100)
 port = 1100
+
+[n1mm]
+# Set enabled = true to forward contacts to N1MM Logger+
+# In N1MM: Config > Configure Ports > WSJT-X tab, check "Enable WSJT-X Decode List",
+# set UDP port to match below; QSOs arrive as WSJT-X "Log QSO" packets (type 5)
+enabled = false
+
+# Hostname or IP of the machine running N1MM Logger+
+host = 127.0.0.1
+
+# UDP port (N1MM WSJT-X listener port; default 2237)
+port = 2237
+
+# Your station callsign (sent inside the WSJT-X Log QSO packet)
+my_call =
 
 [hrd]
 # Set enabled = true to forward contacts to Ham Radio Deluxe (HRD) Logbook
@@ -337,6 +354,108 @@ def send_to_n3fjp(host: str, port: int, adif: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# N1MM Logger+
+# ---------------------------------------------------------------------------
+
+# Offset from Python datetime.date.toordinal() to Qt Julian Day Number.
+# Verified: datetime.date(1970,1,1).toordinal() + 1721425 == 2440588 (Qt epoch).
+_QTDATE_OFFSET  = 1721425
+_WSJTX_MAGIC    = 0xADBCCBDA
+_WSJTX_SCHEMA   = 3  # Qt 5.4+ schema
+
+
+def _wsjtx_str(s: str) -> bytes:
+    """Pack a string as WSJT-X QByteArray: quint32 byte-length + UTF-8 bytes."""
+    enc = s.encode("utf-8") if s else b""
+    return struct.pack(">I", len(enc)) + enc
+
+
+def _wsjtx_datetime(dt_str: str) -> bytes:
+    """
+    Pack a QDateTime in Qt schema-3 wire format.
+    Layout: qint64 Julian day + quint32 ms-since-midnight + quint8 time-spec (1=UTC).
+    """
+    try:
+        dt = datetime.datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+        jd = dt.toordinal() + _QTDATE_OFFSET
+        ms = (dt.hour * 3600 + dt.minute * 60 + dt.second) * 1000
+    except (ValueError, TypeError):
+        jd = datetime.date(1970, 1, 1).toordinal() + _QTDATE_OFFSET
+        ms = 0
+    return struct.pack(">qIB", jd, ms, 1)
+
+
+def send_to_n1mm(cfg: configparser.SectionProxy, adif: str) -> bool:
+    """
+    Send QSO to N1MM Logger+ as a WSJT-X binary 'Log QSO' UDP packet (type 5).
+    N1MM receives it identically to a contact logged through WSJT-X/GridTracker.
+    In N1MM: Config > Configure Ports > WSJT-X tab, enable WSJT-X Decode List,
+    set UDP port to match [n1mm] port in config.ini.
+    Reference: https://github.com/roelandjansen/wsjt-x/blob/master/NetworkMessage.hpp
+    """
+    host    = cfg.get("host", "127.0.0.1")
+    port    = cfg.getint("port", fallback=2237)
+    my_call = cfg.get("my_call", "")
+
+    call     = extract_field(adif, "CALL")
+    freq     = extract_field(adif, "FREQ")
+    mode     = extract_field(adif, "MODE")
+    qso_date = extract_field(adif, "QSO_DATE")
+    time_on  = extract_field(adif, "TIME_ON")
+    time_off_raw = extract_field(adif, "TIME_OFF")
+    time_off = time_off_raw if time_off_raw != "?" else time_on
+    grid     = extract_field(adif, "GRIDSQUARE")
+    grid     = grid if grid != "?" else ""
+    rst_sent = extract_field(adif, "RST_SENT")
+    rst_sent = rst_sent if rst_sent != "?" else ""
+    rst_rcvd = extract_field(adif, "RST_RCVD")
+    rst_rcvd = rst_rcvd if rst_rcvd != "?" else ""
+    name     = extract_field(adif, "NAME")
+    name     = name if name != "?" else ""
+
+    try:
+        freq_hz = int(float(freq) * 1_000_000) if freq and freq != "?" else 0
+    except ValueError:
+        freq_hz = 0
+
+    def _ts(date8: str, time6: str) -> str:
+        if len(date8) == 8 and len(time6) >= 6:
+            return (f"{date8[:4]}-{date8[4:6]}-{date8[6:8]} "
+                    f"{time6[:2]}:{time6[2:4]}:{time6[4:6]}")
+        return ""
+
+    msg = (
+        struct.pack(">III", _WSJTX_MAGIC, _WSJTX_SCHEMA, 5)  # header + type=5
+        + _wsjtx_str("WSJT-X")                   # Id (client name)
+        + _wsjtx_datetime(_ts(qso_date, time_off))  # Date/Time Off
+        + _wsjtx_str(call)                        # DX call
+        + _wsjtx_str(grid)                        # DX grid
+        + struct.pack(">Q", freq_hz)              # Tx frequency Hz (quint64)
+        + _wsjtx_str(mode)                        # Mode
+        + _wsjtx_str(rst_sent)                    # Report sent
+        + _wsjtx_str(rst_rcvd)                    # Report received
+        + _wsjtx_str("")                          # Tx power
+        + _wsjtx_str("")                          # Comments
+        + _wsjtx_str(name)                        # Name
+        + _wsjtx_datetime(_ts(qso_date, time_on)) # Date/Time On
+        + _wsjtx_str("")                          # Operator call
+        + _wsjtx_str(my_call)                     # My call
+        + _wsjtx_str("")                          # My grid
+        + _wsjtx_str("")                          # Exchange sent
+        + _wsjtx_str("")                          # Exchange received
+        + _wsjtx_str("")                          # ADIF propagation mode (schema 3)
+    )
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.sendto(msg, (host, port))
+        return True
+    except (socket.error, OSError) as e:
+        log.error(f"N1MM UDP error ({host}:{port}): {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Ham Radio Deluxe (HRD)
 # ---------------------------------------------------------------------------
 
@@ -530,11 +649,13 @@ def run(config_path: str = "config.ini", stop_event=None):
 
     wavelog_enabled  = cfg.getboolean("wavelog",  "enabled", fallback=False)
     n3fjp_enabled    = cfg.getboolean("n3fjp",    "enabled", fallback=False)
+    n1mm_enabled     = cfg.getboolean("n1mm",     "enabled", fallback=False)
     hrd_enabled      = cfg.getboolean("hrd",      "enabled", fallback=False)
     log4om_enabled   = cfg.getboolean("log4om",   "enabled", fallback=False)
     dxkeeper_enabled = cfg.getboolean("dxkeeper", "enabled", fallback=False)
 
-    if not any([wavelog_enabled, n3fjp_enabled, hrd_enabled, log4om_enabled, dxkeeper_enabled]):
+    if not any([wavelog_enabled, n3fjp_enabled, n1mm_enabled,
+                hrd_enabled, log4om_enabled, dxkeeper_enabled]):
         log.error("No outputs enabled. Set enabled = true in at least one output section.")
         sys.exit(1)
 
@@ -542,6 +663,7 @@ def run(config_path: str = "config.ini", stop_event=None):
     log.info(f"File     : {adi_path}")
     log.info(f"WaveLog  : {'enabled' if wavelog_enabled else 'disabled'}")
     log.info(f"N3FJP    : {'enabled' if n3fjp_enabled else 'disabled'}")
+    log.info(f"N1MM     : {'enabled' if n1mm_enabled else 'disabled'}")
     log.info(f"HRD      : {'enabled' if hrd_enabled else 'disabled'}")
     log.info(f"Log4OM   : {'enabled' if log4om_enabled else 'disabled'}")
     log.info(f"DXKeeper : {'enabled' if dxkeeper_enabled else 'disabled'}")
@@ -584,6 +706,10 @@ def run(config_path: str = "config.ini", stop_event=None):
                     port = cfg["n3fjp"].getint("port", fallback=1100)
                     ok   = send_to_n3fjp(host, port, adif)
                     log.info(f"  N3FJP    : {'OK' if ok else 'FAILED'}")
+
+                if n1mm_enabled:
+                    ok = send_to_n1mm(cfg["n1mm"], adif)
+                    log.info(f"  N1MM     : {'OK' if ok else 'FAILED'}")
 
                 if hrd_enabled:
                     ok = send_to_hrd(cfg["hrd"], adif)

@@ -2,18 +2,14 @@
 
 ## Add N1MM Logger+ support
 
-**Research finding: N1MM Logger+ has no inbound QSO API.**
-
-N1MM's networking interface is outbound-only — it broadcasts `ContactInfo`,
-`ContactReplace`, and `ContactDelete` XML packets via UDP so that *other*
-programs can react to QSOs logged in N1MM. There is no documented mechanism
-for an external program to *submit* a QSO to N1MM over the network. The only
-inbound control is `Radio_SetFrequency` (frequency change only).
-
-Support for N1MM as an output target is not feasible without N1MM adding an
-inbound QSO API. No action items remain.
-
-Reference: https://n1mmwp.hamdocs.com/appendices/external-udp-broadcasts/
+- [x] Research N1MM Logger+'s inbound QSO interface — N1MM receives QSOs via
+      WSJT-X binary UDP "Log QSO" packets (type 5, schema 3) on port 2237,
+      the same mechanism used by GridTracker2 and JTAlert. N1MM must have
+      "Enable WSJT-X Decode List" checked in Config > Configure Ports > WSJT-X tab.
+- [x] Add `send_to_n1mm()` sender in `netlogger_bridge.py` (binary WSJT-X UDP protocol).
+- [x] Add `[n1mm]` section to `SAMPLE_CONFIG` / `config.ini` (enabled, host, port, my_call).
+- [x] Add N1MM fields to the GUI, following the WaveLog/N3FJP `LabelFrame` pattern.
+- [x] Update README.md setup instructions and CLAUDE.md architecture notes.
 
 ## Add Ham Radio Deluxe (HRD) Logbook support
 

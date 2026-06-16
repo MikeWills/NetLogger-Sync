@@ -3,6 +3,7 @@
 Tails NetLogger's `Contacts.adi` file and forwards new QSOs in real-time to:
 - **WaveLog** — via HTTP REST API
 - **N3FJP AC Log** — via its TCP server
+- **N1MM Logger+** — via WSJT-X binary UDP "Log QSO" packet (same as GridTracker2)
 - **Ham Radio Deluxe (HRD) Logbook** — via N1MM-compatible UDP XML
 - **Log4OM v2** — via UDP inbound ADIF
 - **DXLab Suite DXKeeper** — via TCP `externallog` command
@@ -69,6 +70,12 @@ enabled = true
 host = 127.0.0.1
 port = 1100
 
+[n1mm]
+enabled = false
+host = 127.0.0.1
+port = 2237
+my_call = W1AW
+
 [hrd]
 enabled = false
 host = 127.0.0.1
@@ -124,7 +131,22 @@ API reference: https://docs.wavelog.org/developer/api/
 
 API reference: http://www.n3fjp.com/help/api.html
 
-### 5. Ham Radio Deluxe (HRD) setup
+### 5. N1MM Logger+ setup
+
+The bridge sends QSOs as WSJT-X binary UDP "Log QSO" packets (type 5, schema 3)
+— the same method used by GridTracker2 and JTAlert.
+
+1. In N1MM: **Config → Configure Ports → WSJT-X tab**
+2. Check **Enable WSJT-X Decode List**
+3. Note the UDP port (default: `2237`)
+4. Set `host`, `port`, and `my_call` (your station callsign) in `config.ini`
+5. Set `enabled = true`
+
+> **Note:** N1MM Logger+ runs on Windows only.
+
+API reference: https://n1mmwp.hamdocs.com/manual-windows/wsjt-x-decode-list-window/
+
+### 7. Ham Radio Deluxe (HRD) setup
 
 The bridge sends QSOs using N1MM-compatible UDP XML, which HRD Logbook natively accepts.
 
@@ -136,7 +158,7 @@ The bridge sends QSOs using N1MM-compatible UDP XML, which HRD Logbook natively 
 > **Note:** HRD Logbook is Windows-only commercial software. The bridge can
 > run on any platform as long as HRD is reachable over the network.
 
-### 6. Log4OM v2 setup
+### 8. Log4OM v2 setup
 
 The bridge sends QSOs as plain ADIF records over UDP to Log4OM's inbound ADIF service.
 
@@ -151,7 +173,7 @@ The bridge sends QSOs as plain ADIF records over UDP to Log4OM's inbound ADIF se
 
 API reference: Log4OM forum — Communicator > Inbound Connections > ADIF
 
-### 7. DXLab Suite DXKeeper setup
+### 9. DXLab Suite DXKeeper setup
 
 The bridge connects to DXKeeper's TCP port and issues an `externallog` command.
 
