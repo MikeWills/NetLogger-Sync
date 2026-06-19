@@ -12,6 +12,7 @@ Python installs; on some Linux distros install the 'python3-tk' package).
 import logging
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -272,6 +273,17 @@ def get_running_bridge_pid() -> int | None:
     return None
 
 
+def _stop_bridge_process(pid: int):
+    """Terminate a running bridge process by PID."""
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 class QueueHandler(logging.Handler):
     """Logging handler that pushes formatted records onto a queue for the GUI thread."""
 
@@ -315,19 +327,47 @@ class App(tk.Tk):
         self._add_entry(general, "poll_interval", "Poll interval (seconds)")
         self._add_entry(general, "contacts_adi", "Contacts.adi path (blank = auto-detect)")
         self._add_entry(general, "state_file", "State file")
+        self._add_entry(general, "my_call", "My callsign")
 
-        wavelog = ttk.LabelFrame(self, text="WaveLog")
-        wavelog.pack(fill="x", padx=10, pady=5)
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill="x", padx=10, pady=5)
+
+        wavelog = ttk.Frame(notebook)
+        notebook.add(wavelog, text="WaveLog")
         self._add_checkbox(wavelog, "wavelog_enabled", "Enable WaveLog")
         self._add_entry(wavelog, "wavelog_url", "WaveLog URL")
         self._add_entry(wavelog, "wavelog_api_key", "API key")
         self._add_entry(wavelog, "wavelog_station_id", "Station ID")
 
-        n3fjp = ttk.LabelFrame(self, text="N3FJP AC Log")
-        n3fjp.pack(fill="x", padx=10, pady=5)
-        self._add_checkbox(n3fjp, "n3fjp_enabled", "Enable N3FJP")
+        n3fjp = ttk.Frame(notebook)
+        notebook.add(n3fjp, text="N3FJP")
+        self._add_checkbox(n3fjp, "n3fjp_enabled", "Enable N3FJP AC Log")
         self._add_entry(n3fjp, "n3fjp_host", "Host")
         self._add_entry(n3fjp, "n3fjp_port", "Port")
+
+        n1mm = ttk.Frame(notebook)
+        notebook.add(n1mm, text="N1MM")
+        self._add_checkbox(n1mm, "n1mm_enabled", "Enable N1MM Logger+")
+        self._add_entry(n1mm, "n1mm_host", "Host")
+        self._add_entry(n1mm, "n1mm_port", "Port")
+
+        hrd = ttk.Frame(notebook)
+        notebook.add(hrd, text="HRD")
+        self._add_checkbox(hrd, "hrd_enabled", "Enable Ham Radio Deluxe")
+        self._add_entry(hrd, "hrd_host", "Host")
+        self._add_entry(hrd, "hrd_port", "Port")
+
+        log4om = ttk.Frame(notebook)
+        notebook.add(log4om, text="Log4OM")
+        self._add_checkbox(log4om, "log4om_enabled", "Enable Log4OM v2")
+        self._add_entry(log4om, "log4om_host", "Host")
+        self._add_entry(log4om, "log4om_port", "Port")
+
+        dxkeeper = ttk.Frame(notebook)
+        notebook.add(dxkeeper, text="DXKeeper")
+        self._add_checkbox(dxkeeper, "dxkeeper_enabled", "Enable DXLab DXKeeper")
+        self._add_entry(dxkeeper, "dxkeeper_host", "Host")
+        self._add_entry(dxkeeper, "dxkeeper_port", "Port")
 
         buttons = ttk.Frame(self)
         buttons.pack(fill="x", padx=10, pady=5)
@@ -373,7 +413,10 @@ class App(tk.Tk):
         general = self.cfg["general"]
         self.vars["poll_interval"].set(general.get("poll_interval", "10"))
         self.vars["contacts_adi"].set(general.get("contacts_adi", ""))
-        self.vars["state_file"].set(general.get("state_file", "last_offset.txt"))
+        self.vars["state_file"].set(general.get("state_file", "forwarded_qsos.txt"))
+        n1mm_call = self.cfg["n1mm"].get("my_call", "")
+        hrd_call = self.cfg["hrd"].get("my_call", "")
+        self.vars["my_call"].set(n1mm_call or hrd_call)
 
         wavelog = self.cfg["wavelog"]
         self.vars["wavelog_enabled"].set(wavelog.getboolean("enabled", fallback=False))
@@ -385,6 +428,26 @@ class App(tk.Tk):
         self.vars["n3fjp_enabled"].set(n3fjp.getboolean("enabled", fallback=False))
         self.vars["n3fjp_host"].set(n3fjp.get("host", "127.0.0.1"))
         self.vars["n3fjp_port"].set(n3fjp.get("port", "1100"))
+
+        n1mm = self.cfg["n1mm"]
+        self.vars["n1mm_enabled"].set(n1mm.getboolean("enabled", fallback=False))
+        self.vars["n1mm_host"].set(n1mm.get("host", "127.0.0.1"))
+        self.vars["n1mm_port"].set(n1mm.get("port", "2237"))
+
+        hrd = self.cfg["hrd"]
+        self.vars["hrd_enabled"].set(hrd.getboolean("enabled", fallback=False))
+        self.vars["hrd_host"].set(hrd.get("host", "127.0.0.1"))
+        self.vars["hrd_port"].set(hrd.get("port", "7826"))
+
+        log4om = self.cfg["log4om"]
+        self.vars["log4om_enabled"].set(log4om.getboolean("enabled", fallback=False))
+        self.vars["log4om_host"].set(log4om.get("host", "127.0.0.1"))
+        self.vars["log4om_port"].set(log4om.get("port", "2237"))
+
+        dxkeeper = self.cfg["dxkeeper"]
+        self.vars["dxkeeper_enabled"].set(dxkeeper.getboolean("enabled", fallback=False))
+        self.vars["dxkeeper_host"].set(dxkeeper.get("host", "127.0.0.1"))
+        self.vars["dxkeeper_port"].set(dxkeeper.get("port", "52001"))
 
     def _save_config(self):
         general = self.cfg["general"]
@@ -403,6 +466,30 @@ class App(tk.Tk):
         n3fjp["host"] = self.vars["n3fjp_host"].get()
         n3fjp["port"] = self.vars["n3fjp_port"].get()
 
+        my_call = self.vars["my_call"].get()
+
+        n1mm = self.cfg["n1mm"]
+        n1mm["enabled"] = "true" if self.vars["n1mm_enabled"].get() else "false"
+        n1mm["host"] = self.vars["n1mm_host"].get()
+        n1mm["port"] = self.vars["n1mm_port"].get()
+        n1mm["my_call"] = my_call
+
+        hrd = self.cfg["hrd"]
+        hrd["enabled"] = "true" if self.vars["hrd_enabled"].get() else "false"
+        hrd["host"] = self.vars["hrd_host"].get()
+        hrd["port"] = self.vars["hrd_port"].get()
+        hrd["my_call"] = my_call
+
+        log4om = self.cfg["log4om"]
+        log4om["enabled"] = "true" if self.vars["log4om_enabled"].get() else "false"
+        log4om["host"] = self.vars["log4om_host"].get()
+        log4om["port"] = self.vars["log4om_port"].get()
+
+        dxkeeper = self.cfg["dxkeeper"]
+        dxkeeper["enabled"] = "true" if self.vars["dxkeeper_enabled"].get() else "false"
+        dxkeeper["host"] = self.vars["dxkeeper_host"].get()
+        dxkeeper["port"] = self.vars["dxkeeper_port"].get()
+
         with open(CONFIG_ABS_PATH, "w", encoding="utf-8") as f:
             self.cfg.write(f)
 
@@ -410,13 +497,25 @@ class App(tk.Tk):
     # Bridge control
     # ------------------------------------------------------------------
     def _toggle_run(self):
-        if self.worker and self.worker.is_alive():
-            self.stop_event.set()
+        if self.start_button.cget("text") == "Stop":
+            if self.worker and self.worker.is_alive():
+                self.stop_event.set()
+            else:
+                pid = get_running_bridge_pid()
+                if pid is not None:
+                    _stop_bridge_process(pid)
             self.start_button.config(state="disabled")
             self.status_label.config(text="Stopping...")
         else:
-            if not self.vars["wavelog_enabled"].get() and not self.vars["n3fjp_enabled"].get():
-                messagebox.showerror("NetLogger Bridge", "Enable WaveLog and/or N3FJP first.")
+            if not any([
+                self.vars["wavelog_enabled"].get(),
+                self.vars["n3fjp_enabled"].get(),
+                self.vars["n1mm_enabled"].get(),
+                self.vars["hrd_enabled"].get(),
+                self.vars["log4om_enabled"].get(),
+                self.vars["dxkeeper_enabled"].get(),
+            ]):
+                messagebox.showerror("NetLogger Bridge", "Enable at least one output first.")
                 return
 
             pid = get_running_bridge_pid()
@@ -457,15 +556,25 @@ class App(tk.Tk):
         if self.worker and self.worker.is_alive():
             self.after(500, self._watch_worker)
         else:
-            self.start_button.config(text="Start", state="normal")
-            self.status_label.config(text="Stopped")
+            if get_running_bridge_pid() is None:
+                self.start_button.config(text="Start", state="normal")
+                self.status_label.config(text="Stopped")
+            # If an external process is still alive, _poll_process_status will
+            # set the button to "Stop" on its next tick.
 
     def _poll_process_status(self):
         pid = get_running_bridge_pid()
+        no_thread = not (self.worker and self.worker.is_alive())
         if pid is not None:
             self.process_label.config(text=f"Bridge process: running (PID {pid})")
+            if no_thread:
+                self.start_button.config(text="Stop", state="normal")
+                self.status_label.config(text="Running")
         else:
             self.process_label.config(text="Bridge process: not running")
+            if no_thread:
+                self.start_button.config(text="Start", state="normal")
+                self.status_label.config(text="Stopped")
         self.after(2000, self._poll_process_status)
 
     # ------------------------------------------------------------------
