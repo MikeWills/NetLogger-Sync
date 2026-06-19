@@ -7,6 +7,7 @@ Tails NetLogger's `Contacts.adi` file and forwards new QSOs in real-time to:
 - **Ham Radio Deluxe (HRD) Logbook** — via its Network Server TCP API
 - **Log4OM v2** — via UDP inbound ADIF
 - **DXLab Suite DXKeeper** — via TCP `externallog` command
+- **MacLoggerDX** — via WSJT-X binary UDP "Log QSO" packet, same as N1MM (Mac-only; untested, see setup section below)
 
 Any combination of outputs can be enabled independently.
 
@@ -91,6 +92,12 @@ port = 2234
 enabled = false
 host = 127.0.0.1
 port = 52001
+
+[macloggerdx]
+enabled = false
+host = 127.0.0.1
+port = 2237
+my_call = W1AW
 ```
 
 ### 2. NetLogger Contacts.adi auto-detection
@@ -199,6 +206,31 @@ The bridge connects to DXKeeper's TCP port and issues an `externallog` command.
 > platform as long as DXKeeper is reachable over the network.
 
 API reference: https://www.dxlabsuite.com/Interoperation.htm
+
+### 9. MacLoggerDX setup
+
+> **Untested:** unlike the other five outputs, this one hasn't been verified
+> against a real running MacLoggerDX — it's built from MacLoggerDX's own
+> documentation only (Mac-only software, no Mac was available to test
+> against). N1MM and HRD both needed real bug fixes after their first
+> implementations despite following official-looking docs before they
+> actually worked, so treat this one the same way until it's been tested.
+
+The bridge sends QSOs as the same WSJT-X binary UDP messages used for N1MM (a
+"Log QSO" packet plus a "LoggedADIF" packet) — MacLoggerDX documents
+listening for this exact traffic from WSJT-X, JTDX, and JS8Call.
+
+1. In MacLoggerDX: **Station prefs**, enable the WSJT-X/JTDX/JS8Call UDP option
+2. Note the UDP port (default: `2237`, same as N1MM's default — if both run
+   on the same machine they'll need different ports)
+3. Set `host`, `port`, and `my_call` (your station callsign) in `config.ini`
+4. Set `enabled = true`
+
+> **Note:** MacLoggerDX runs on macOS only. The bridge (running on whatever
+> machine tails NetLogger's `Contacts.adi`) just needs to reach it over the
+> network.
+
+API reference: https://dogparksoftware.com/MacLoggerDX%20Help/mldxfc_wsjtx.html
 
 ---
 

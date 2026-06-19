@@ -369,6 +369,12 @@ class App(tk.Tk):
         self._add_entry(dxkeeper, "dxkeeper_host", "Host")
         self._add_entry(dxkeeper, "dxkeeper_port", "Port")
 
+        macloggerdx = ttk.Frame(notebook)
+        notebook.add(macloggerdx, text="MacLoggerDX")
+        self._add_checkbox(macloggerdx, "macloggerdx_enabled", "Enable MacLoggerDX")
+        self._add_entry(macloggerdx, "macloggerdx_host", "Host")
+        self._add_entry(macloggerdx, "macloggerdx_port", "Port")
+
         buttons = ttk.Frame(self)
         buttons.pack(fill="x", padx=10, pady=5)
         ttk.Button(buttons, text="Save Config", command=self._save_config).pack(side="left")
@@ -416,7 +422,8 @@ class App(tk.Tk):
         self.vars["state_file"].set(general.get("state_file", "forwarded_qsos.txt"))
         n1mm_call = self.cfg["n1mm"].get("my_call", "")
         hrd_call = self.cfg["hrd"].get("my_call", "")
-        self.vars["my_call"].set(n1mm_call or hrd_call)
+        macloggerdx_call = self.cfg["macloggerdx"].get("my_call", "")
+        self.vars["my_call"].set(n1mm_call or hrd_call or macloggerdx_call)
 
         wavelog = self.cfg["wavelog"]
         self.vars["wavelog_enabled"].set(wavelog.getboolean("enabled", fallback=False))
@@ -448,6 +455,11 @@ class App(tk.Tk):
         self.vars["dxkeeper_enabled"].set(dxkeeper.getboolean("enabled", fallback=False))
         self.vars["dxkeeper_host"].set(dxkeeper.get("host", "127.0.0.1"))
         self.vars["dxkeeper_port"].set(dxkeeper.get("port", "52001"))
+
+        macloggerdx = self.cfg["macloggerdx"]
+        self.vars["macloggerdx_enabled"].set(macloggerdx.getboolean("enabled", fallback=False))
+        self.vars["macloggerdx_host"].set(macloggerdx.get("host", "127.0.0.1"))
+        self.vars["macloggerdx_port"].set(macloggerdx.get("port", "2237"))
 
     def _save_config(self):
         general = self.cfg["general"]
@@ -490,6 +502,12 @@ class App(tk.Tk):
         dxkeeper["host"] = self.vars["dxkeeper_host"].get()
         dxkeeper["port"] = self.vars["dxkeeper_port"].get()
 
+        macloggerdx = self.cfg["macloggerdx"]
+        macloggerdx["enabled"] = "true" if self.vars["macloggerdx_enabled"].get() else "false"
+        macloggerdx["host"] = self.vars["macloggerdx_host"].get()
+        macloggerdx["port"] = self.vars["macloggerdx_port"].get()
+        macloggerdx["my_call"] = my_call
+
         with open(CONFIG_ABS_PATH, "w", encoding="utf-8") as f:
             self.cfg.write(f)
 
@@ -514,6 +532,7 @@ class App(tk.Tk):
                 self.vars["hrd_enabled"].get(),
                 self.vars["log4om_enabled"].get(),
                 self.vars["dxkeeper_enabled"].get(),
+                self.vars["macloggerdx_enabled"].get(),
             ]):
                 messagebox.showerror("NetLogger Bridge", "Enable at least one output first.")
                 return

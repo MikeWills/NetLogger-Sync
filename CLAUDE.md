@@ -18,6 +18,7 @@ ADIF log file for newly appended QSO records and forwards each one to:
 - **Ham Radio Deluxe (HRD) Logbook** via its Network Server TCP API (`db add {FIELD="VALUE" ...}`) on port 7826
 - **Log4OM v2** via UDP inbound ADIF (plain ADIF record datagram, user-configured port)
 - **DXLab Suite DXKeeper** via TCP `externallog` command on port 52001
+- **MacLoggerDX** via the same WSJT-X binary UDP packets as N1MM, on port 2237 (Mac-only; unverified — no Mac was available to test against real software)
 
 Any combination of outputs can be enabled independently via `config.ini`.
 
@@ -100,7 +101,8 @@ The script is organized as a sequence of self-contained sections, run via a sing
 polling loop in `run()`:
 
 1. **Config** (`load_config`, `create_sample_config`) — `configparser`-based, sections
-   `[general]`, `[wavelog]`, `[n3fjp]`, `[n1mm]`, `[hrd]`, `[log4om]`, `[dxkeeper]`.
+   `[general]`, `[wavelog]`, `[n3fjp]`, `[n1mm]`, `[hrd]`, `[log4om]`, `[dxkeeper]`,
+   `[macloggerdx]`.
 2. **ADI file location** (`find_adi_file`, `ADI_PATHS`) — locates NetLogger's
    `Contacts.adi`, auto-detecting an OS-specific default path if `contacts_adi` is blank.
 3. **ADIF file tailer** (`read_all_records`, `normalize_adif`, `extract_field`,
@@ -117,12 +119,13 @@ polling loop in `run()`:
    to decide whether a record has already been forwarded — see state persistence
    below).
 4. **Output senders** (`send_to_wavelog`, `send_to_n3fjp`, `send_to_n1mm`,
-   `send_to_hrd`, `send_to_log4om`, `send_to_dxkeeper`) — each takes a built ADIF
-   record string and pushes it to one destination, returning a bool success flag.
-   `send_to_services` (in the "Output dispatch" section) wraps all six behind a
-   single `{service_name: sender_fn}` table, keyed by the same short names used
-   throughout state persistence (`wavelog`, `n3fjp`, `n1mm`, `hrd`, `log4om`,
-   `dxkeeper`) and `SERVICE_LABELS` (their display names for logging, e.g.
+   `send_to_hrd`, `send_to_log4om`, `send_to_dxkeeper`, `send_to_macloggerdx`) —
+   each takes a built ADIF record string and pushes it to one destination,
+   returning a bool success flag. `send_to_services` (in the "Output
+   dispatch" section) wraps all seven behind a single `{service_name:
+   sender_fn}` table, keyed by the same short names used throughout state
+   persistence (`wavelog`, `n3fjp`, `n1mm`, `hrd`, `log4om`, `dxkeeper`,
+   `macloggerdx`) and `SERVICE_LABELS` (their display names for logging, e.g.
    `"n3fjp" -> "N3FJP"`). It takes an `only` set so the same function serves both
    a first attempt (every enabled service) and a retry (just the services that
    previously failed for that contact) — see state persistence below.
@@ -133,20 +136,26 @@ polling loop in `run()`:
    over TCP — ADDADIFRECORD writes directly to N3FJP's log file but doesn't refresh
    its on-screen list, and CHECKLOG forces that reload. ADDADIFRECORD itself has no
    documented response, so a timeout/no-response is normal, not an error.
-   `send_to_n1mm` sends two WSJT-X binary UDP messages per QSO — a structured
-   "Log QSO" packet (type 5) and a "LoggedADIF" packet (type 12, a
+   `send_to_n1mm` and `send_to_macloggerdx` both send two WSJT-X binary UDP
+   messages per QSO, built by the shared `_build_wsjtx_qso_messages` — a
+   structured "Log QSO" packet (type 5) and a "LoggedADIF" packet (type 12, a
    self-contained ADIF record as one length-prefixed blob) — using helpers
    `_wsjtx_str` (QByteArray: quint32 length + UTF-8), `_wsjtx_null` (a *null*,
    as opposed to empty, QByteArray: length -1), and `_wsjtx_datetime`
-   (QDateTime: qint64 Julian day + quint32 ms + quint8 UTC spec). Both the
-   schema version (`_WSJTX_SCHEMA = 2`, not WSJT-X's own current schema 3)
-   and the second (type 12) message were only discovered by diffing a real
-   WSJT-X-to-N1MM capture against this function's original output —
-   structurally-correct type-5-only packets at schema 3 sent without error
-   but never appeared in N1MM. N1MM's WSJT-X Decode List must be enabled on
-   the matching port *and N1MM fully restarted* (it only binds the listening
-   socket on startup, not when the setting is saved). This is the same
-   mechanism GridTracker2 uses.
+   (QDateTime: qint64 Julian day + quint32 ms + quint8 UTC spec). For N1MM,
+   both the schema version (`_WSJTX_SCHEMA = 2`, not WSJT-X's own current
+   schema 3) and the second (type 12) message were only discovered by
+   diffing a real WSJT-X-to-N1MM capture against this function's original
+   output — structurally-correct type-5-only packets at schema 3 sent
+   without error but never appeared in N1MM. N1MM's WSJT-X Decode List must
+   be enabled on the matching port *and N1MM fully restarted* (it only binds
+   the listening socket on startup, not when the setting is saved). This is
+   the same mechanism GridTracker2 uses. `send_to_macloggerdx` reuses the
+   identical packet bytes on the assumption that MacLoggerDX (which
+   documents listening for this same real-world WSJT-X traffic on port 2237)
+   behaves the same way — **unverified**, since no Mac was available to test
+   against a real install; treat it as the most likely output to need a
+   fix once actually tested, the way N1MM and HRD did.
    `send_to_hrd` sends a plain-text `db add {FIELD="VALUE" ...}` command over TCP
    to HRD's Network Server (default port 7826) — a different HRD feature from
    "QSO Forwarding" (UDP/XML), which was tried first and never worked. This
@@ -235,10 +244,10 @@ polling loop in `run()`:
 - The tailer operates on raw bytes/text — it does not parse NetLogger's ADIF fields
   beyond pulling `Call`/`Band`/`Mode` for log messages via `extract_field`. Records
   are forwarded as-is (with `<EOR>` re-appended) to WaveLog, N3FJP, Log4OM, and
-  DXKeeper. The N1MM and HRD senders instead extract individual fields (`CALL`,
-  `FREQ`, `QSO_DATE`, `TIME_ON`, `RST_SENT`, `RST_RCVD`, etc.) to build their
-  own wire formats (a WSJT-X binary packet and a `db add` text command,
-  respectively) rather than forwarding the ADIF string directly.
+  DXKeeper. The N1MM, HRD, and MacLoggerDX senders instead extract individual
+  fields (`CALL`, `FREQ`, `QSO_DATE`, `TIME_ON`, `RST_SENT`, `RST_RCVD`, etc.)
+  to build their own wire formats (a WSJT-X binary packet for N1MM/MacLoggerDX,
+  a `db add` text command for HRD) rather than forwarding the ADIF string directly.
 - `read_all_records` only includes *complete* records (i.e. those followed by
   `<eor>`); a partially-written trailing record is left for the next poll. This
   also makes seeding (first run / `--reset-state`) safe against NetLogger being
