@@ -85,7 +85,7 @@ my_call = W1AW
 [log4om]
 enabled = false
 host = 127.0.0.1
-port = 2237
+port = 2234
 
 [dxkeeper]
 enabled = false
@@ -150,7 +150,7 @@ a "LoggedADIF" packet) — the same method used by GridTracker2 and JTAlert.
 
 API reference: https://n1mmwp.hamdocs.com/manual-windows/wsjt-x-decode-list-window/
 
-### 7. Ham Radio Deluxe (HRD) setup
+### 6. Ham Radio Deluxe (HRD) setup
 
 The bridge sends QSOs using HRD Logbook's **Network Server** TCP API (a plain-text
 `db add {FIELD="VALUE" ...}` command) — this is a different feature from HRD's
@@ -169,13 +169,14 @@ The bridge sends QSOs using HRD Logbook's **Network Server** TCP API (a plain-te
 > is stale for current versions — this implementation was reverse-engineered
 > from a real GridTracker-to-HRD capture, since that's what actually works.
 
-### 8. Log4OM v2 setup
+### 7. Log4OM v2 setup
 
 The bridge sends QSOs as plain ADIF records over UDP to Log4OM's inbound ADIF service.
 
 1. In Log4OM, go to **Communicator → Inbound Connections**
-2. Click **Add**, select type **ADIF**, and enter a port number (e.g. `2237`)
-3. Click the **+** button to activate the listener
+2. Click **Add**, select type **ADIF**, and enter a port number (e.g. `2234`)
+3. Click the **+** button to activate the listener, **then click Save** — it's
+   easy to miss, and the connection won't actually start listening until you do
 4. Set `host` and `port` in `config.ini` to match
 5. Set `enabled = true`
 
@@ -184,7 +185,15 @@ The bridge sends QSOs as plain ADIF records over UDP to Log4OM's inbound ADIF se
 
 API reference: Log4OM forum — Communicator > Inbound Connections > ADIF
 
-### 9. DXLab Suite DXKeeper setup
+### 8. DXLab Suite DXKeeper setup
+
+> **Untested:** unlike the other five outputs, this one hasn't been verified
+> against a real running DXKeeper yet — it's built from DXLab's published API
+> docs only. WaveLog, N3FJP, N1MM, HRD, and Log4OM were each confirmed working
+> against the real software (N1MM and HRD needed real bug fixes after their
+> first implementations, despite following official-looking docs, before
+> they actually worked) — DXKeeper hasn't been through that same pass yet, so
+> treat it as more likely than the others to need a similar fix.
 
 The bridge connects to DXKeeper's TCP port and issues an `externallog` command.
 
@@ -193,6 +202,9 @@ The bridge connects to DXKeeper's TCP port and issues an `externallog` command.
    **base port + 1** (default base is `52000`, so DXKeeper uses `52001`)
 3. Set `host` and `port` in `config.ini`
 4. Set `enabled = true`
+
+> **Note:** DXLab Suite runs on Windows only. The bridge can run on any
+> platform as long as DXKeeper is reachable over the network.
 
 API reference: https://www.dxlabsuite.com/Interoperation.htm
 

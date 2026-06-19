@@ -442,7 +442,7 @@ class App(tk.Tk):
         log4om = self.cfg["log4om"]
         self.vars["log4om_enabled"].set(log4om.getboolean("enabled", fallback=False))
         self.vars["log4om_host"].set(log4om.get("host", "127.0.0.1"))
-        self.vars["log4om_port"].set(log4om.get("port", "2237"))
+        self.vars["log4om_port"].set(log4om.get("port", "2234"))
 
         dxkeeper = self.cfg["dxkeeper"]
         self.vars["dxkeeper_enabled"].set(dxkeeper.getboolean("enabled", fallback=False))

@@ -150,7 +150,7 @@ enabled = false
 host = 127.0.0.1
 
 # UDP port (must match the Log4OM inbound ADIF connection port you configured)
-port = 2237
+port = 2234
 
 [dxkeeper]
 # Set enabled = true to forward contacts to DXLab Suite DXKeeper
@@ -661,7 +661,7 @@ def send_to_services(cfg: configparser.ConfigParser, adif: str, enabled: dict, o
         "n1mm":     lambda: send_to_n1mm(cfg["n1mm"], adif),
         "hrd":      lambda: send_to_hrd(cfg["hrd"], adif),
         "log4om":   lambda: send_to_log4om(cfg["log4om"].get("host", "127.0.0.1"),
-                                            cfg["log4om"].getint("port", fallback=2237), adif),
+                                            cfg["log4om"].getint("port", fallback=2234), adif),
         "dxkeeper": lambda: send_to_dxkeeper(cfg["dxkeeper"].get("host", "127.0.0.1"),
                                               cfg["dxkeeper"].getint("port", fallback=52001), adif),
     }
