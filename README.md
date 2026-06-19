@@ -4,7 +4,7 @@ Tails NetLogger's `Contacts.adi` file and forwards new QSOs in real-time to:
 - **WaveLog** — via HTTP REST API
 - **N3FJP AC Log** — via its TCP server
 - **N1MM Logger+** — via WSJT-X binary UDP "Log QSO" packet (same as GridTracker2)
-- **Ham Radio Deluxe (HRD) Logbook** — via N1MM-compatible UDP XML
+- **Ham Radio Deluxe (HRD) Logbook** — via its Network Server TCP API
 - **Log4OM v2** — via UDP inbound ADIF
 - **DXLab Suite DXKeeper** — via TCP `externallog` command
 
@@ -57,7 +57,7 @@ This creates `config.ini`. Edit it:
 [general]
 poll_interval = 10          # seconds between file polls
 contacts_adi =               # leave blank to auto-detect
-state_file = last_offset.txt
+state_file = forwarded_qsos.txt
 
 [wavelog]
 enabled = true
@@ -79,7 +79,7 @@ my_call = W1AW
 [hrd]
 enabled = false
 host = 127.0.0.1
-port = 12060
+port = 7826
 my_call = W1AW
 
 [log4om]
@@ -105,10 +105,12 @@ If `contacts_adi` is blank, the bridge looks here by default:
 
 If your install differs, set the full path in `[general] contacts_adi`.
 
-> **Note:** On first run, the bridge starts reading from the *end* of the
-> existing `Contacts.adi` file — only QSOs logged after that point are
-> forwarded. The current byte offset is saved to `state_file` so restarts
-> resume from where they left off.
+> **Note:** On first run, the bridge marks every QSO already in
+> `Contacts.adi` as already forwarded (without sending any of them) — only
+> QSOs logged after that point go out. Which contacts have been forwarded is
+> tracked in `state_file` by callsign + date + time + band, not file
+> position, so editing or deleting old entries in `Contacts.adi` won't cause
+> contacts to be skipped or re-sent.
 
 ### 3. WaveLog setup
 
@@ -148,15 +150,22 @@ API reference: https://n1mmwp.hamdocs.com/manual-windows/wsjt-x-decode-list-wind
 
 ### 7. Ham Radio Deluxe (HRD) setup
 
-The bridge sends QSOs using N1MM-compatible UDP XML, which HRD Logbook natively accepts.
+The bridge sends QSOs using HRD Logbook's **Network Server** TCP API (a plain-text
+`db add {FIELD="VALUE" ...}` command) — this is a different feature from HRD's
+"QSO Forwarding" (which is UDP and not used here).
 
-1. In HRD Logbook, go to **Tools → QSO Forwarding**
-2. Enable the **N1MM** source and set the port (default: `12060`)
-3. Set `host`, `port`, and `my_call` (your station callsign) in `config.ini`
+1. In HRD Logbook, go to **Tools → Network Server**
+2. Ensure **Autostart** is checked, and note the command port on the Logbook
+   tab (`7826` by default in recent HRD versions)
+3. Set `host`, `port`, and `my_call` (fallback callsign, only used if a
+   contact's ADIF record has no `Station_Callsign` of its own) in `config.ini`
 4. Set `enabled = true`
 
 > **Note:** HRD Logbook is Windows-only commercial software. The bridge can
 > run on any platform as long as HRD is reachable over the network.
+> HRD's documented API syntax (a quoted database name before the field list)
+> is stale for current versions — this implementation was reverse-engineered
+> from a real GridTracker-to-HRD capture, since that's what actually works.
 
 ### 8. Log4OM v2 setup
 
@@ -196,6 +205,10 @@ python netlogger_bridge.py
 # Custom config file
 python netlogger_bridge.py /path/to/myconfig.ini
 
+# Mark every contact currently in Contacts.adi as already forwarded (skip
+# everything already in the file; only QSOs logged from now on will be sent)
+python netlogger_bridge.py --reset-state
+
 # GUI (config editor + start/stop + live log)
 python netlogger_gui.py
 ```
@@ -204,6 +217,38 @@ The GUI requires Tk, which ships with most Python installs. On some Linux
 distros, install it separately: `sudo apt install python3-tk`.
 
 Logs go to console and `netlogger_bridge.log`.
+
+The bridge tracks forwarding status per contact in `forwarded_qsos.txt` (or
+whatever `state_file` is set to in `config.ini`) — one JSON object per line,
+sorted chronologically by QSO date/time rather than by byte position, so
+editing or deleting old entries in `Contacts.adi` can't cause it to skip or
+re-send anything. Each line records which enabled outputs succeeded, e.g.:
+
+```json
+{"key": "20260618|031552|KE9ESR|80M", "wavelog": true, "n3fjp": false, "first_attempt": "2026-06-18T03:15:52Z", "last_attempt": "2026-06-18T03:15:52Z"}
+```
+
+A contact with any `false` output is retried automatically once an hour for
+up to 5 days (handling a logger or web service being briefly unreachable);
+once everything succeeds, the timestamps are dropped and the line shrinks to
+just the per-output results. If an output still hasn't succeeded after 5
+days, the bridge stops retrying and adds `"gave_up": true` so you can spot it
+later — search the file for `false` or `gave_up` to find contacts that never
+fully made it out.
+
+A line's entry is only dropped once its contact is no longer found in
+`Contacts.adi` (i.e. you deleted it in NetLogger), keeping the state file in
+sync with what's actually still logged.
+
+To force a specific contact to be re-sent to *every* enabled output (e.g. you
+fixed it in NetLogger, or want to retry sooner than the hourly schedule),
+stop the bridge, find and delete its line in `forwarded_qsos.txt`, then start
+the bridge again — it'll forward just that one contact on the next poll.
+
+Run `--reset-state` (with the bridge stopped) any time you want it to forget
+everything already in the file and only forward new contacts going forward —
+e.g. after testing, or if it was offline for a while and you don't want a
+backlog of old QSOs replayed to your loggers.
 
 ---
 

@@ -8,6 +8,7 @@ Cross-platform: Windows, macOS, Linux
 """
 
 import datetime
+import json
 import struct
 import time
 import socket
@@ -15,10 +16,8 @@ import logging
 import sys
 import os
 import re
-import uuid
 import configparser
 from pathlib import Path
-from xml.sax.saxutils import escape as _xml_escape
 
 try:
     import requests
@@ -84,8 +83,8 @@ poll_interval = 10
 # Linux default:   ~/.config/NetLogger/Contacts.adi
 contacts_adi =
 
-# File used to store the byte offset between restarts
-state_file = last_offset.txt
+# File used to track which contacts have already been forwarded, between restarts
+state_file = forwarded_qsos.txt
 
 [wavelog]
 # Set enabled = true to forward contacts to WaveLog
@@ -128,16 +127,18 @@ my_call =
 
 [hrd]
 # Set enabled = true to forward contacts to Ham Radio Deluxe (HRD) Logbook
-# In HRD: Tools > QSO Forwarding, enable N1MM source, set port to match below
+# In HRD: Tools > Network Server, ensure Autostart is enabled and note the
+# command port on the Logbook tab (NOT the "QSO Forwarding" UDP feature)
 enabled = false
 
 # Hostname or IP of the machine running HRD Logbook
 host = 127.0.0.1
 
-# UDP port (must match HRD's QSO Forwarding N1MM port; default 12060)
-port = 12060
+# TCP port for HRD's Network Server command interface (default 7826)
+port = 7826
 
-# Your station callsign — included in the N1MM-compatible XML packet sent to HRD
+# Fallback station callsign, only used if a contact's ADIF record has no
+# Station_Callsign field of its own
 my_call =
 
 [log4om]
@@ -220,39 +221,26 @@ def find_adi_file(cfg_path: str) -> Path:
 # ADIF file tailer
 # ---------------------------------------------------------------------------
 
-def read_new_records(adi_path: Path, offset: int) -> tuple[list[str], int]:
+def read_all_records(adi_path: Path) -> list[str]:
     """
-    Read any new complete ADIF records appended since `offset`.
-    Returns (list_of_adif_record_strings, new_offset).
-    Each record string is the raw text between the previous <eor> and the next one.
+    Read every complete ADIF record currently in the file.
+    Each record string is the raw text between one <eor> and the next; a
+    trailing partial record (still being written by NetLogger) is dropped.
     """
     try:
         with open(adi_path, "rb") as f:
-            f.seek(offset)
-            chunk = f.read()
-            new_offset = offset + len(chunk)
-
-        if not chunk:
-            return [], offset
-
-        text = chunk.decode("utf-8", errors="replace")
-
-        # Split on <eor> (case-insensitive); keep only complete records
-        parts = re.split(r'<eor>', text, flags=re.IGNORECASE)
-
-        # Last element is either empty or an incomplete record — don't process it
-        complete = parts[:-1]
-
-        # Calculate offset: only advance past complete records
-        incomplete_tail = parts[-1].encode("utf-8", errors="replace")
-        adjusted_offset = new_offset - len(incomplete_tail)
-
-        records = [p.strip() for p in complete if p.strip()]
-        return records, adjusted_offset
-
+            data = f.read()
     except OSError as e:
         log.warning(f"File read error: {e}")
-        return [], offset
+        return []
+
+    text = data.decode("utf-8", errors="replace")
+
+    # Split on <eor> (case-insensitive); keep only complete records
+    parts = re.split(r'<eor>', text, flags=re.IGNORECASE)
+    complete = parts[:-1]  # last element is empty or an incomplete trailing record
+
+    return [p.strip() for p in complete if p.strip()]
 
 
 ADIF_FIELD_RE = re.compile(r'<(\w+):(\d+)(?::\w+)?>', re.IGNORECASE)
@@ -285,6 +273,25 @@ def extract_field(adif: str, field: str) -> str:
     """Extract a single field value from an ADIF string for logging purposes."""
     match = re.search(rf'<{field}:\d+>([^<]*)', adif, re.IGNORECASE)
     return match.group(1).strip() if match else "?"
+
+
+def record_dedup_key(adif: str) -> str:
+    """
+    Build a stable identity for a QSO: QSO_DATE|TIME_ON|CALL|BAND.
+
+    Used instead of file position to track what's already been forwarded, so
+    edits/deletions elsewhere in Contacts.adi can't desync the bridge. BAND is
+    included because a multi-band net can plausibly work the same station
+    several times in one day on different bands; QSO_DATE+TIME_ON+CALL alone
+    wouldn't distinguish those. Date/time lead the key (rather than call) so
+    the state file sorts chronologically — easier to scan by net session when
+    looking for one contact to delete and force a re-log.
+    """
+    call     = extract_field(adif, "CALL").upper()
+    qso_date = extract_field(adif, "QSO_DATE")
+    time_on  = extract_field(adif, "TIME_ON")
+    band     = extract_field(adif, "BAND").upper()
+    return f"{qso_date}|{time_on}|{call}|{band}"
 
 
 # ---------------------------------------------------------------------------
@@ -460,110 +467,82 @@ def send_to_n1mm(cfg: configparser.SectionProxy, adif: str) -> bool:
 # Ham Radio Deluxe (HRD)
 # ---------------------------------------------------------------------------
 
-# ADIF BAND → nominal lower-edge MHz string for N1MM ContactInfo XML <band>
-_BAND_TO_MHZ = {
-    "2190M": "0.137", "630M": "0.475", "160M": "1.8", "80M": "3.5",
-    "60M": "5", "40M": "7", "30M": "10", "20M": "14", "17M": "18",
-    "15M": "21", "12M": "24", "10M": "28", "6M": "50", "4M": "70",
-    "2M": "144", "1.25M": "222", "70CM": "432", "33CM": "902",
-    "23CM": "1240", "13CM": "2300",
-}
-
-
 def send_to_hrd(cfg: configparser.SectionProxy, adif: str) -> bool:
     """
-    Send QSO to HRD Logbook via N1MM-compatible UDP XML ContactInfo packet.
-    HRD listens for N1MM UDP broadcasts: Tools > QSO Forwarding > N1MM.
-    Reference: https://n1mmwp.hamdocs.com/appendices/external-udp-broadcasts/
+    Send QSO to HRD Logbook via its Network Server's plain-text TCP API
+    ('db add {FIELD="VALUE" ...}'). In HRD: Tools > Network Server, ensure
+    Autostart is enabled; the command port (Logbook tab, default 7826 in
+    recent versions) must match [hrd] port in config.ini. HRD's "QSO
+    Forwarding" (UDP, N1MM-compatible XML) is a *different* feature and was
+    not used here — this command syntax was reverse-engineered from a real
+    GridTracker-to-HRD TCP capture, since HRD's own published API docs (a
+    quoted database name before the field list, e.g. 'db add "My Logbook"
+    {...}') turned out to be stale for current HRD versions, which both omit
+    the database name and expect FREQ in Hz rather than MHz.
     """
-    host    = cfg.get("host", "127.0.0.1")
-    port    = cfg.getint("port", fallback=12060)
-    my_call = cfg.get("my_call", "")
+    host = cfg.get("host", "127.0.0.1")
+    port = cfg.getint("port", fallback=7826)
 
-    call     = extract_field(adif, "CALL")
-    band     = extract_field(adif, "BAND")
-    mode     = extract_field(adif, "MODE")
-    freq     = extract_field(adif, "FREQ")
     qso_date = extract_field(adif, "QSO_DATE")
     time_on  = extract_field(adif, "TIME_ON")
-    rst_sent = extract_field(adif, "RST_SENT")
-    rst_sent = rst_sent if rst_sent != "?" else "599"
-    rst_rcvd = extract_field(adif, "RST_RCVD")
-    rst_rcvd = rst_rcvd if rst_rcvd != "?" else "599"
+    time_off = extract_field(adif, "TIME_OFF")
+    time_off = time_off if time_off != "?" else time_on
+    freq     = extract_field(adif, "FREQ")
 
-    # Timestamp: YYYY-MM-DD HH:MM:SS
-    if len(qso_date) == 8 and len(time_on) >= 6:
-        ts = (f"{qso_date[:4]}-{qso_date[4:6]}-{qso_date[6:8]} "
-              f"{time_on[:2]}:{time_on[2:4]}:{time_on[4:6]}")
-    else:
-        ts = ""
+    station_callsign = extract_field(adif, "STATION_CALLSIGN")
+    station_callsign = station_callsign if station_callsign != "?" else cfg.get("my_call", "")
 
-    # Band in MHz (N1MM <band> format)
-    band_mhz = _BAND_TO_MHZ.get(band.upper(), "14")
+    fields = {
+        "CALL":             extract_field(adif, "CALL"),
+        "MODE":             extract_field(adif, "MODE"),
+        "RST_SENT":         extract_field(adif, "RST_SENT"),
+        "RST_RCVD":         extract_field(adif, "RST_RCVD"),
+        "QSO_DATE":         qso_date,
+        "TIME_ON":          time_on,
+        "QSO_DATE_OFF":     qso_date,
+        "TIME_OFF":         time_off,
+        "BAND":             extract_field(adif, "BAND"),
+        "GRIDSQUARE":       extract_field(adif, "GRIDSQUARE"),
+        "NAME":             extract_field(adif, "NAME"),
+        "CNTY":             extract_field(adif, "CNTY"),
+        "STATE":            extract_field(adif, "STATE"),
+        "DXCC":             extract_field(adif, "DXCC"),
+        "COUNTRY":          extract_field(adif, "COUNTRY"),
+        "COMMENT":          extract_field(adif, "COMMENT"),
+        "OPERATOR":         extract_field(adif, "OPERATOR"),
+        "STATION_CALLSIGN": station_callsign,
+    }
 
-    # Frequency in N1MM units (10 Hz resolution: MHz × 100 000)
     try:
-        n1mm_freq = int(float(freq) * 100_000) if freq and freq != "?" else int(float(band_mhz) * 100_000)
+        if freq and freq != "?":
+            fields["FREQ"] = str(round(float(freq) * 1_000_000))
     except ValueError:
-        n1mm_freq = int(float(band_mhz) * 100_000)
+        pass
 
-    xml = (
-        '<?xml version="1.0" encoding="utf-8"?>'
-        '<contactinfo>'
-        '<app>N1MM</app>'
-        f'<contestname></contestname>'
-        f'<contestnr>0</contestnr>'
-        f'<timestamp>{_xml_escape(ts)}</timestamp>'
-        f'<mycall>{_xml_escape(my_call)}</mycall>'
-        f'<band>{_xml_escape(band_mhz)}</band>'
-        f'<rxfreq>{n1mm_freq}</rxfreq>'
-        f'<txfreq>{n1mm_freq}</txfreq>'
-        f'<operator>{_xml_escape(my_call)}</operator>'
-        f'<mode>{_xml_escape(mode)}</mode>'
-        f'<call>{_xml_escape(call)}</call>'
-        '<countryprefix></countryprefix>'
-        '<wpxprefix></wpxprefix>'
-        '<stationprefix></stationprefix>'
-        '<continent></continent>'
-        f'<snt>{_xml_escape(rst_sent)}</snt>'
-        '<sntnr>0</sntnr>'
-        f'<rcv>{_xml_escape(rst_rcvd)}</rcv>'
-        '<rcvnr>0</rcvnr>'
-        '<gridsquare></gridsquare>'
-        '<exchange1></exchange1>'
-        '<sect></sect>'
-        '<comment></comment>'
-        '<qth></qth>'
-        '<name></name>'
-        '<power></power>'
-        '<misctext></misctext>'
-        '<zone>0</zone>'
-        '<prec></prec>'
-        '<ck>0</ck>'
-        '<ismultiplier1>0</ismultiplier1>'
-        '<ismultiplier2>0</ismultiplier2>'
-        '<ismultiplier3>0</ismultiplier3>'
-        '<points>1</points>'
-        '<radionr>1</radionr>'
-        '<run1run2>0</run1run2>'
-        '<RoverLocation></RoverLocation>'
-        '<RadioInterfaced>0</RadioInterfaced>'
-        '<NetBiosName></NetBiosName>'
-        '<IsOriginal>True</IsOriginal>'
-        '<IsRunQSO>0</IsRunQSO>'
-        f'<StationName>{_xml_escape(my_call)}</StationName>'
-        f'<ID>{{{uuid.uuid4()}}}</ID>'
-        '<IsClaimedQso>1</IsClaimedQso>'
-        '</contactinfo>'
+    # Double quotes would break the "FIELD="VALUE"" syntax; ham log comments
+    # essentially never contain them, but swap rather than risk corrupting
+    # every field after it in the command.
+    parts = " ".join(
+        f'{name}="{value.replace(chr(34), chr(39))}"'
+        for name, value in fields.items() if value and value != "?"
     )
-    log.debug(f"HRD XML: {xml}")
+    command = f"ver\r\ndb add {{{parts}}}\r\nexit\r\n"
 
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.sendto(xml.encode("utf-8"), (host, port))
+        with socket.create_connection((host, port), timeout=5) as sock:
+            sock.sendall(command.encode("utf-8"))
+            sock.settimeout(2)
+            try:
+                response = sock.recv(4096).decode("utf-8", errors="replace")
+                log.debug(f"HRD response: {response.strip()}")
+                if "Added" not in response:
+                    log.error(f"HRD rejected record: {response.strip()}")
+                    return False
+            except socket.timeout:
+                log.debug("HRD sent no response within 2s")
         return True
     except (socket.error, OSError) as e:
-        log.error(f"HRD UDP error ({host}:{port}): {e}")
+        log.error(f"HRD TCP error ({host}:{port}): {e}")
         return False
 
 
@@ -628,18 +607,158 @@ def send_to_dxkeeper(host: str, port: int, adif: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# State persistence (byte offset)
+# Output dispatch (used for both first attempts and per-service retries)
 # ---------------------------------------------------------------------------
 
-def load_offset(state_file: str) -> int:
+SERVICE_LABELS = {
+    "wavelog":  "WaveLog",
+    "n3fjp":    "N3FJP",
+    "n1mm":     "N1MM",
+    "hrd":      "HRD",
+    "log4om":   "Log4OM",
+    "dxkeeper": "DXKeeper",
+}
+
+
+def send_to_services(cfg: configparser.ConfigParser, adif: str, enabled: dict, only: set = None) -> dict:
+    """
+    Send `adif` to every enabled service, or just the ones named in `only`
+    (used to retry previously-failed services without re-sending to ones
+    that already succeeded). Returns {service: success} for each one tried.
+    """
+    senders = {
+        "wavelog":  lambda: send_to_wavelog(cfg["wavelog"], adif),
+        "n3fjp":    lambda: send_to_n3fjp(cfg["n3fjp"].get("host", "127.0.0.1"),
+                                           cfg["n3fjp"].getint("port", fallback=1100), adif),
+        "n1mm":     lambda: send_to_n1mm(cfg["n1mm"], adif),
+        "hrd":      lambda: send_to_hrd(cfg["hrd"], adif),
+        "log4om":   lambda: send_to_log4om(cfg["log4om"].get("host", "127.0.0.1"),
+                                            cfg["log4om"].getint("port", fallback=2237), adif),
+        "dxkeeper": lambda: send_to_dxkeeper(cfg["dxkeeper"].get("host", "127.0.0.1"),
+                                              cfg["dxkeeper"].getint("port", fallback=52001), adif),
+    }
+    results = {}
+    for name, sender in senders.items():
+        if not enabled.get(name) or (only is not None and name not in only):
+            continue
+        ok = results[name] = sender()
+        log.info(f"  {SERVICE_LABELS[name]:<9}: {'OK' if ok else 'FAILED'}")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# State persistence (per-contact, per-service forwarding status)
+# ---------------------------------------------------------------------------
+
+RETRY_INTERVAL       = datetime.timedelta(hours=1)
+RETRY_GIVE_UP_AFTER  = datetime.timedelta(days=5)
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_iso(ts: str) -> datetime.datetime:
+    return datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+
+
+def _is_done(record: dict) -> bool:
+    """A record needs no more attention once every service it was attempted against succeeded, or retries were abandoned."""
+    if record.get("gave_up"):
+        return True
+    return all(v for k, v in record.items() if k in SERVICE_LABELS)
+
+
+def load_state(state_file: str) -> dict:
+    """
+    Returns {"initialized": bool, "records": {dedup_key: record}}.
+    Each record is a dict of {service_name: success_bool} for whichever
+    services were attempted, plus "first_attempt"/"last_attempt" (ISO UTC)
+    once a retry is pending, and "gave_up": True once retries are abandoned
+    after RETRY_GIVE_UP_AFTER. A fully-successful record has no extra keys.
+
+    A missing file means 'never run before' (initialized=False), causing the
+    caller to silently seed from the current file rather than forward
+    everything. An existing file is one JSON object per line — e.g.
+    {"key": "...", "wavelog": true, "n3fjp": false, "first_attempt": "...",
+    "last_attempt": "..."} — sorted chronologically (the key's date/time
+    lead) so it's easy to scan for one contact. To force a contact to be
+    re-logged to every enabled service, delete its line and restart the
+    bridge. Older on-disk formats are migrated transparently: a bare byte
+    offset or a plain pipe-delimited key (pre-retry-tracking) become a
+    no-detail record (treated as already complete, since those formats only
+    ever recorded a key once it had been attempted), and the brief JSON-dict
+    version's "keys" are extracted the same way.
+    """
+    path = Path(state_file)
+    if not path.exists():
+        return {"initialized": False, "records": {}}
+
+    text = path.read_text(encoding="utf-8")
     try:
-        return int(Path(state_file).read_text().strip())
-    except (FileNotFoundError, ValueError):
-        return -1  # -1 = not yet initialized
+        data = json.loads(text)
+        if isinstance(data, dict) and "keys" in data:
+            return {"initialized": True, "records": {k: {} for k in data["keys"]}}
+    except ValueError:
+        pass
+
+    records = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            if not isinstance(obj, dict) or "key" not in obj:
+                raise ValueError
+            key = obj.pop("key")
+        except (ValueError, KeyError):
+            key, obj = line, {}
+        records[key] = obj
+
+    return {"initialized": True, "records": records}
 
 
-def save_offset(state_file: str, offset: int):
-    Path(state_file).write_text(str(offset))
+def save_state(state_file: str, records: dict):
+    lines = [json.dumps({"key": key, **records[key]}) for key in sorted(records)]
+    Path(state_file).write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+
+def prune_records(records: dict, current_keys: set) -> dict:
+    """
+    Drop records for contacts no longer present in Contacts.adi (i.e. you
+    deleted them in NetLogger), keeping the state file from growing forever.
+
+    Pruning by age instead of presence is wrong here: `read_all_records`
+    rescans the *entire* file every poll (by design, so edits/deletions can't
+    desync anything), so a record from years ago is still "found" on every
+    poll for as long as it stays in the file. Dropping it just because it's
+    old would make it look new again on the very next poll — forwarding it
+    again, re-adding it, then dropping it again next cycle, forever.
+    """
+    return {k: v for k, v in records.items() if k in current_keys}
+
+
+def _seed_keys_from_existing(adi_path: Path) -> dict:
+    """Build no-detail (already-complete) records for every QSO currently in the file, without forwarding any of them."""
+    return {record_dedup_key(normalize_adif(raw)): {} for raw in read_all_records(adi_path)}
+
+
+def reset_state(config_path: str = "config.ini"):
+    """
+    Re-arm 'first run' behavior: mark every QSO currently in Contacts.adi as
+    already forwarded (without sending any of them), so the next `run()`
+    only forwards QSOs logged from this point on.
+    """
+    cfg = load_config(config_path)
+    general = cfg["general"]
+    state_file = str(resolve_path(general.get("state_file", "forwarded_qsos.txt")))
+    adi_path = find_adi_file(general.get("contacts_adi", ""))
+
+    records = _seed_keys_from_existing(adi_path)
+    save_state(state_file, records)
+    log.info(f"State reset — marking {len(records)} existing contact(s) in {adi_path} as already logged. "
+             "Only new contacts logged from this point will be forwarded.")
 
 
 # ---------------------------------------------------------------------------
@@ -655,91 +774,98 @@ def run(config_path: str = "config.ini", stop_event=None):
     cfg = load_config(config_path)
     general = cfg["general"]
 
-    poll_interval  = general.getint("poll_interval", fallback=10)
-    state_file     = str(resolve_path(general.get("state_file", "last_offset.txt")))
-    adi_path       = find_adi_file(general.get("contacts_adi", ""))
+    poll_interval   = general.getint("poll_interval", fallback=10)
+    state_file      = str(resolve_path(general.get("state_file", "forwarded_qsos.txt")))
+    adi_path        = find_adi_file(general.get("contacts_adi", ""))
 
-    wavelog_enabled  = cfg.getboolean("wavelog",  "enabled", fallback=False)
-    n3fjp_enabled    = cfg.getboolean("n3fjp",    "enabled", fallback=False)
-    n1mm_enabled     = cfg.getboolean("n1mm",     "enabled", fallback=False)
-    hrd_enabled      = cfg.getboolean("hrd",      "enabled", fallback=False)
-    log4om_enabled   = cfg.getboolean("log4om",   "enabled", fallback=False)
-    dxkeeper_enabled = cfg.getboolean("dxkeeper", "enabled", fallback=False)
+    enabled = {
+        "wavelog":  cfg.getboolean("wavelog",  "enabled", fallback=False),
+        "n3fjp":    cfg.getboolean("n3fjp",    "enabled", fallback=False),
+        "n1mm":     cfg.getboolean("n1mm",     "enabled", fallback=False),
+        "hrd":      cfg.getboolean("hrd",      "enabled", fallback=False),
+        "log4om":   cfg.getboolean("log4om",   "enabled", fallback=False),
+        "dxkeeper": cfg.getboolean("dxkeeper", "enabled", fallback=False),
+    }
 
-    if not any([wavelog_enabled, n3fjp_enabled, n1mm_enabled,
-                hrd_enabled, log4om_enabled, dxkeeper_enabled]):
+    if not any(enabled.values()):
         log.error("No outputs enabled. Set enabled = true in at least one output section.")
         sys.exit(1)
 
     log.info(f"NetLogger Bridge starting — polling every {poll_interval}s")
     log.info(f"File     : {adi_path}")
-    log.info(f"WaveLog  : {'enabled' if wavelog_enabled else 'disabled'}")
-    log.info(f"N3FJP    : {'enabled' if n3fjp_enabled else 'disabled'}")
-    log.info(f"N1MM     : {'enabled' if n1mm_enabled else 'disabled'}")
-    log.info(f"HRD      : {'enabled' if hrd_enabled else 'disabled'}")
-    log.info(f"Log4OM   : {'enabled' if log4om_enabled else 'disabled'}")
-    log.info(f"DXKeeper : {'enabled' if dxkeeper_enabled else 'disabled'}")
+    for name, label in SERVICE_LABELS.items():
+        log.info(f"{label:<9}: {'enabled' if enabled[name] else 'disabled'}")
 
-    offset = load_offset(state_file)
+    state   = load_state(state_file)
+    records = state["records"]
 
-    # First run: skip to end of existing file so we only forward NEW contacts
-    if offset == -1:
-        with open(adi_path, "rb") as f:
-            f.seek(0, 2)  # Seek to end
-            offset = f.tell()
-        save_offset(state_file, offset)
-        log.info(f"First run — starting at end of file (offset {offset}). "
+    # First run: mark every QSO already in the file as seen, without
+    # forwarding it, so only contacts logged from this point on go out.
+    if not state["initialized"]:
+        records = _seed_keys_from_existing(adi_path)
+        save_state(state_file, records)
+        log.info(f"First run — marking {len(records)} existing contact(s) as already logged. "
                  "Only new contacts logged from this point will be forwarded.")
-
     else:
-        log.info(f"Resuming from byte offset {offset}")
+        log.info(f"Resuming — tracking {len(records)} previously forwarded contact(s)")
 
     try:
         PID_FILE.write_text(str(os.getpid()))
 
         while stop_event is None or not stop_event.is_set():
-            records, offset = read_new_records(adi_path, offset)
+            current_keys = set()
+            now = datetime.datetime.now(datetime.timezone.utc)
 
-            for raw in records:
-                adif     = normalize_adif(raw)
+            for raw in read_all_records(adi_path):
+                adif = normalize_adif(raw)
+                key  = record_dedup_key(adif)
+                current_keys.add(key)
+
+                record = records.get(key)
+                if record is not None and _is_done(record):
+                    continue
+
                 callsign = extract_field(adif, "Call")
                 band     = extract_field(adif, "Band")
                 mode     = extract_field(adif, "Mode")
 
-                log.info(f"New contact: {callsign} {band} {mode}")
-                log.debug(f"ADIF: {adif}")
+                if record is None:
+                    log.info(f"New contact: {callsign} {band} {mode}")
+                    log.debug(f"ADIF: {adif}")
+                    results = send_to_services(cfg, adif, enabled)
+                    if all(results.values()):
+                        records[key] = results
+                    else:
+                        ts = _now_iso()
+                        records[key] = {**results, "first_attempt": ts, "last_attempt": ts}
+                    save_state(state_file, records)
+                    continue
 
-                if wavelog_enabled:
-                    ok = send_to_wavelog(cfg["wavelog"], adif)
-                    log.info(f"  WaveLog  : {'OK' if ok else 'FAILED'}")
+                # Previously attempted but incomplete — retry hourly, give up after 5 days
+                if now - _parse_iso(record["last_attempt"]) < RETRY_INTERVAL:
+                    continue
 
-                if n3fjp_enabled:
-                    host = cfg["n3fjp"].get("host", "127.0.0.1")
-                    port = cfg["n3fjp"].getint("port", fallback=1100)
-                    ok   = send_to_n3fjp(host, port, adif)
-                    log.info(f"  N3FJP    : {'OK' if ok else 'FAILED'}")
+                failed = {name for name in SERVICE_LABELS if record.get(name) is False}
+                log.info(f"Retrying contact: {callsign} {band} {mode} (pending: {', '.join(sorted(failed))})")
+                record.update(send_to_services(cfg, adif, enabled, only=failed))
 
-                if n1mm_enabled:
-                    ok = send_to_n1mm(cfg["n1mm"], adif)
-                    log.info(f"  N1MM     : {'OK' if ok else 'FAILED'}")
+                if all(record.get(name, True) for name in SERVICE_LABELS):
+                    record.pop("first_attempt", None)
+                    record.pop("last_attempt", None)
+                elif now - _parse_iso(record["first_attempt"]) >= RETRY_GIVE_UP_AFTER:
+                    still = sorted(name for name in SERVICE_LABELS if record.get(name) is False)
+                    log.warning(f"Giving up on {callsign} {band} {mode} after 5 days — never reached: {', '.join(still)}")
+                    record["gave_up"] = True
+                else:
+                    record["last_attempt"] = _now_iso()
 
-                if hrd_enabled:
-                    ok = send_to_hrd(cfg["hrd"], adif)
-                    log.info(f"  HRD      : {'OK' if ok else 'FAILED'}")
+                records[key] = record
+                save_state(state_file, records)
 
-                if log4om_enabled:
-                    host = cfg["log4om"].get("host", "127.0.0.1")
-                    port = cfg["log4om"].getint("port", fallback=2237)
-                    ok   = send_to_log4om(host, port, adif)
-                    log.info(f"  Log4OM   : {'OK' if ok else 'FAILED'}")
-
-                if dxkeeper_enabled:
-                    host = cfg["dxkeeper"].get("host", "127.0.0.1")
-                    port = cfg["dxkeeper"].getint("port", fallback=52001)
-                    ok   = send_to_dxkeeper(host, port, adif)
-                    log.info(f"  DXKeeper : {'OK' if ok else 'FAILED'}")
-
-                save_offset(state_file, offset)
+            pruned = prune_records(records, current_keys)
+            if len(pruned) != len(records):
+                records = pruned
+                save_state(state_file, records)
 
             if stop_event is not None:
                 if stop_event.wait(poll_interval):
@@ -770,6 +896,10 @@ if __name__ == "__main__":
         if not arg.startswith("--"):
             config_file = arg
             break
+
+    if "--reset-state" in sys.argv:
+        reset_state(config_file)
+        sys.exit(0)
 
     try:
         run(config_file)

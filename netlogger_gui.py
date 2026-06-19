@@ -413,7 +413,7 @@ class App(tk.Tk):
         general = self.cfg["general"]
         self.vars["poll_interval"].set(general.get("poll_interval", "10"))
         self.vars["contacts_adi"].set(general.get("contacts_adi", ""))
-        self.vars["state_file"].set(general.get("state_file", "last_offset.txt"))
+        self.vars["state_file"].set(general.get("state_file", "forwarded_qsos.txt"))
         n1mm_call = self.cfg["n1mm"].get("my_call", "")
         hrd_call = self.cfg["hrd"].get("my_call", "")
         self.vars["my_call"].set(n1mm_call or hrd_call)
@@ -437,7 +437,7 @@ class App(tk.Tk):
         hrd = self.cfg["hrd"]
         self.vars["hrd_enabled"].set(hrd.getboolean("enabled", fallback=False))
         self.vars["hrd_host"].set(hrd.get("host", "127.0.0.1"))
-        self.vars["hrd_port"].set(hrd.get("port", "12060"))
+        self.vars["hrd_port"].set(hrd.get("port", "7826"))
 
         log4om = self.cfg["log4om"]
         self.vars["log4om_enabled"].set(log4om.getboolean("enabled", fallback=False))
