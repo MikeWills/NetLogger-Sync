@@ -369,7 +369,8 @@ def send_to_n3fjp(host: str, port: int, adif: str) -> bool:
 # Verified: datetime.date(1970,1,1).toordinal() + 1721425 == 2440588 (Qt epoch).
 _QTDATE_OFFSET  = 1721425
 _WSJTX_MAGIC    = 0xADBCCBDA
-_WSJTX_SCHEMA   = 3  # Qt 5.4+ schema
+_WSJTX_SCHEMA   = 2  # matches a real WSJT-X capture against N1MM+ 1.0.x; N1MM
+                      # appears to ignore packets declaring schema 3
 
 
 def _wsjtx_str(s: str) -> bytes:
@@ -378,9 +379,19 @@ def _wsjtx_str(s: str) -> bytes:
     return struct.pack(">I", len(enc)) + enc
 
 
+def _wsjtx_null() -> bytes:
+    """
+    Pack a *null* WSJT-X QByteArray (length -1), distinct from an empty one
+    (length 0, what `_wsjtx_str("")` produces). A real WSJT-X capture showed
+    every unset string field using length 0 except the trailing field, which
+    used -1 — replicated here rather than guessed at.
+    """
+    return struct.pack(">i", -1)
+
+
 def _wsjtx_datetime(dt_str: str) -> bytes:
     """
-    Pack a QDateTime in Qt schema-3 wire format.
+    Pack a QDateTime in WSJT-X wire format.
     Layout: qint64 Julian day + quint32 ms-since-midnight + quint8 time-spec (1=UTC).
     """
     try:
@@ -395,10 +406,13 @@ def _wsjtx_datetime(dt_str: str) -> bytes:
 
 def send_to_n1mm(cfg: configparser.SectionProxy, adif: str) -> bool:
     """
-    Send QSO to N1MM Logger+ as a WSJT-X binary 'Log QSO' UDP packet (type 5).
-    N1MM receives it identically to a contact logged through WSJT-X/GridTracker.
-    In N1MM: Config > Configure Ports > WSJT-X tab, enable WSJT-X Decode List,
-    set UDP port to match [n1mm] port in config.ini.
+    Send QSO to N1MM Logger+ as WSJT-X binary UDP messages: a structured
+    'Log QSO' packet (type 5) plus a 'LoggedADIF' packet (type 12) wrapping a
+    self-contained ADIF record, matching what a real WSJT-X capture showed it
+    sends for one logged QSO. In N1MM: Config > Configure Ports > WSJT-X tab,
+    enable WSJT-X Decode List, set UDP port to match [n1mm] port in
+    config.ini, then *fully restart N1MM* (the dialog warns changes need a
+    restart, and won't bind the listening socket until you do).
     Reference: https://github.com/roelandjansen/wsjt-x/blob/master/NetworkMessage.hpp
     """
     host    = cfg.get("host", "127.0.0.1")
@@ -420,6 +434,8 @@ def send_to_n1mm(cfg: configparser.SectionProxy, adif: str) -> bool:
     rst_rcvd = rst_rcvd if rst_rcvd != "?" else ""
     name     = extract_field(adif, "NAME")
     name     = name if name != "?" else ""
+    operator = extract_field(adif, "OPERATOR")
+    operator = operator if operator != "?" else my_call
 
     try:
         freq_hz = int(float(freq) * 1_000_000) if freq and freq != "?" else 0
@@ -446,17 +462,29 @@ def send_to_n1mm(cfg: configparser.SectionProxy, adif: str) -> bool:
         + _wsjtx_str("")                          # Comments
         + _wsjtx_str(name)                        # Name
         + _wsjtx_datetime(_ts(qso_date, time_on)) # Date/Time On
-        + _wsjtx_str("")                          # Operator call
+        + _wsjtx_str(operator)                    # Operator call
         + _wsjtx_str(my_call)                     # My call
         + _wsjtx_str("")                          # My grid
         + _wsjtx_str("")                          # Exchange sent
         + _wsjtx_str("")                          # Exchange received
-        + _wsjtx_str("")                          # ADIF propagation mode (schema 3)
+        + _wsjtx_null()                           # ADIF propagation mode (unset)
+    )
+
+    # A real WSJT-X capture showed it sends this *and* a second message type
+    # (12, "LoggedADIF") containing a self-contained ADIF record for the same
+    # QSO immediately after — some receivers key off one or the other, so
+    # both are sent here too rather than guessing which N1MM actually uses.
+    adif_blob = f"<ADIF_VER:5>3.1.0<PROGRAMID:16>NetLogger-Bridge<EOH>{adif}"
+    msg_adif = (
+        struct.pack(">III", _WSJTX_MAGIC, _WSJTX_SCHEMA, 12)  # header + type=12
+        + _wsjtx_str("WSJT-X")    # Id (client name)
+        + _wsjtx_str(adif_blob)   # ADIF text
     )
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.sendto(msg, (host, port))
+            sock.sendto(msg_adif, (host, port))
         return True
     except (socket.error, OSError) as e:
         log.error(f"N1MM UDP error ({host}:{port}): {e}")

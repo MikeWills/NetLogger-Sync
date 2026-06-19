@@ -14,7 +14,7 @@ Single-file Python bridge (`netlogger_bridge.py`) that tails NetLogger's `Contac
 ADIF log file for newly appended QSO records and forwards each one to:
 - **WaveLog** via HTTP REST API (`POST {url}/api/qso`)
 - **N3FJP AC Log** via a raw TCP API (`<CMD><ADDADIFRECORD><VALUE>...</CMD>`)
-- **N1MM Logger+** via WSJT-X binary UDP "Log QSO" packet (type 5, schema 3) on port 2237
+- **N1MM Logger+** via WSJT-X binary UDP "Log QSO" + "LoggedADIF" packets (types 5/12, schema 2) on port 2237
 - **Ham Radio Deluxe (HRD) Logbook** via its Network Server TCP API (`db add {FIELD="VALUE" ...}`) on port 7826
 - **Log4OM v2** via UDP inbound ADIF (plain ADIF record datagram, user-configured port)
 - **DXLab Suite DXKeeper** via TCP `externallog` command on port 52001
@@ -133,10 +133,19 @@ polling loop in `run()`:
    over TCP — ADDADIFRECORD writes directly to N3FJP's log file but doesn't refresh
    its on-screen list, and CHECKLOG forces that reload. ADDADIFRECORD itself has no
    documented response, so a timeout/no-response is normal, not an error.
-   `send_to_n1mm` builds a WSJT-X binary "Log QSO" UDP packet (type 5, schema 3)
-   using helpers `_wsjtx_str` (QByteArray: quint32 length + UTF-8) and
-   `_wsjtx_datetime` (QDateTime: qint64 Julian day + quint32 ms + quint8 UTC spec);
-   N1MM's WSJT-X Decode List must be enabled on the matching port. This is the same
+   `send_to_n1mm` sends two WSJT-X binary UDP messages per QSO — a structured
+   "Log QSO" packet (type 5) and a "LoggedADIF" packet (type 12, a
+   self-contained ADIF record as one length-prefixed blob) — using helpers
+   `_wsjtx_str` (QByteArray: quint32 length + UTF-8), `_wsjtx_null` (a *null*,
+   as opposed to empty, QByteArray: length -1), and `_wsjtx_datetime`
+   (QDateTime: qint64 Julian day + quint32 ms + quint8 UTC spec). Both the
+   schema version (`_WSJTX_SCHEMA = 2`, not WSJT-X's own current schema 3)
+   and the second (type 12) message were only discovered by diffing a real
+   WSJT-X-to-N1MM capture against this function's original output —
+   structurally-correct type-5-only packets at schema 3 sent without error
+   but never appeared in N1MM. N1MM's WSJT-X Decode List must be enabled on
+   the matching port *and N1MM fully restarted* (it only binds the listening
+   socket on startup, not when the setting is saved). This is the same
    mechanism GridTracker2 uses.
    `send_to_hrd` sends a plain-text `db add {FIELD="VALUE" ...}` command over TCP
    to HRD's Network Server (default port 7826) — a different HRD feature from

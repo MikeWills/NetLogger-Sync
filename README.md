@@ -135,14 +135,16 @@ API reference: http://www.n3fjp.com/help/api.html
 
 ### 5. N1MM Logger+ setup
 
-The bridge sends QSOs as WSJT-X binary UDP "Log QSO" packets (type 5, schema 3)
-— the same method used by GridTracker2 and JTAlert.
+The bridge sends QSOs as WSJT-X binary UDP messages (a "Log QSO" packet plus
+a "LoggedADIF" packet) — the same method used by GridTracker2 and JTAlert.
 
 1. In N1MM: **Config → Configure Ports → WSJT-X tab**
-2. Check **Enable WSJT-X Decode List**
+2. Check **Enable** under Radio #1 Settings
 3. Note the UDP port (default: `2237`)
 4. Set `host`, `port`, and `my_call` (your station callsign) in `config.ini`
 5. Set `enabled = true`
+6. **Fully restart N1MM+** — the dialog warns changes need a restart, and it
+   won't actually open the listening socket until you do
 
 > **Note:** N1MM Logger+ runs on Windows only.
 
