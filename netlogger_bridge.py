@@ -602,13 +602,14 @@ def send_to_dxkeeper(host: str, port: int, adif: str) -> bool:
     Send QSO to DXKeeper via its TCP externallog command.
     DXKeeper listens on base_port + 1 (default 52001).
     Message format uses DXLab ADIF field encoding:
-      <command:11>externallog<parameters:N><ExternalLogADIF:M>[adif fields]
+      <command:11>externallog<parameters:N><ExternalLogADIF:M>[adif fields incl. <EOR>]
+    DXLab's own documented example keeps the trailing <EOR> inside
+    ExternalLogADIF's length-prefixed payload; an earlier version of this
+    function stripped it, leaving an incomplete ADIF record that DXKeeper
+    silently refused to log ("could not be logged:" with no reason given).
     Reference: https://www.dxlabsuite.com/Interoperation.htm
     """
-    # DXKeeper expects ADIF fields without the trailing <EOR>
-    adif_fields = adif
-    if adif_fields.upper().endswith("<EOR>"):
-        adif_fields = adif_fields[:-5].rstrip()
+    adif_fields = adif if adif.upper().endswith("<EOR>") else adif.rstrip() + "<EOR>"
 
     M      = len(adif_fields.encode("utf-8"))
     params = f"<ExternalLogADIF:{M}>{adif_fields}"

@@ -187,14 +187,6 @@ API reference: Log4OM forum — Communicator > Inbound Connections > ADIF
 
 ### 8. DXLab Suite DXKeeper setup
 
-> **Untested:** unlike the other five outputs, this one hasn't been verified
-> against a real running DXKeeper yet — it's built from DXLab's published API
-> docs only. WaveLog, N3FJP, N1MM, HRD, and Log4OM were each confirmed working
-> against the real software (N1MM and HRD needed real bug fixes after their
-> first implementations, despite following official-looking docs, before
-> they actually worked) — DXKeeper hasn't been through that same pass yet, so
-> treat it as more likely than the others to need a similar fix.
-
 The bridge connects to DXKeeper's TCP port and issues an `externallog` command.
 
 1. Ensure DXKeeper is running

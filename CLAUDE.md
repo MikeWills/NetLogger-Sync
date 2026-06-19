@@ -161,8 +161,12 @@ polling loop in `run()`:
    treated as success. `send_to_log4om` sends the ADIF record
    as a raw UDP datagram to Log4OM's inbound ADIF service. `send_to_dxkeeper`
    builds a DXLab ADIF-encoded TCP message
-   (`<command:11>externallog<parameters:N><ExternalLogADIF:M>[adif fields]`)
-   and sends it to DXKeeper on port 52001.
+   (`<command:11>externallog<parameters:N><ExternalLogADIF:M>[adif fields incl.
+   <EOR>]`) and sends it to DXKeeper on port 52001 — DXLab's own documented
+   example keeps `<EOR>` inside that length-prefixed payload; stripping it (an
+   earlier version of this function did) leaves an incomplete ADIF record
+   that DXKeeper silently refuses with "could not be logged:" and no reason
+   given.
 5. **State persistence** (`load_state`, `save_state`, `prune_records`,
    `_seed_keys_from_existing`, `reset_state`, `_is_done`) — tracks per-contact,
    per-service forwarding status by `record_dedup_key`, not file position,
