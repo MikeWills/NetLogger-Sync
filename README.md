@@ -7,6 +7,7 @@ Tails NetLogger's `Contacts.adi` file and forwards new QSOs in real-time to:
 - **Ham Radio Deluxe (HRD) Logbook** — via its Network Server TCP API
 - **Log4OM v2** — via UDP inbound ADIF
 - **DXLab Suite DXKeeper** — via TCP `externallog` command
+- **MacLoggerDX** — via WSJT-X binary UDP "Log QSO" packet, same as N1MM (Mac-only; untested, see setup section below)
 
 Any combination of outputs can be enabled independently.
 
@@ -85,12 +86,18 @@ my_call = W1AW
 [log4om]
 enabled = false
 host = 127.0.0.1
-port = 2237
+port = 2234
 
 [dxkeeper]
 enabled = false
 host = 127.0.0.1
 port = 52001
+
+[macloggerdx]
+enabled = false
+host = 127.0.0.1
+port = 2237
+my_call = W1AW
 ```
 
 ### 2. NetLogger Contacts.adi auto-detection
@@ -135,20 +142,22 @@ API reference: http://www.n3fjp.com/help/api.html
 
 ### 5. N1MM Logger+ setup
 
-The bridge sends QSOs as WSJT-X binary UDP "Log QSO" packets (type 5, schema 3)
-— the same method used by GridTracker2 and JTAlert.
+The bridge sends QSOs as WSJT-X binary UDP messages (a "Log QSO" packet plus
+a "LoggedADIF" packet) — the same method used by GridTracker2 and JTAlert.
 
 1. In N1MM: **Config → Configure Ports → WSJT-X tab**
-2. Check **Enable WSJT-X Decode List**
+2. Check **Enable** under Radio #1 Settings
 3. Note the UDP port (default: `2237`)
 4. Set `host`, `port`, and `my_call` (your station callsign) in `config.ini`
 5. Set `enabled = true`
+6. **Fully restart N1MM+** — the dialog warns changes need a restart, and it
+   won't actually open the listening socket until you do
 
 > **Note:** N1MM Logger+ runs on Windows only.
 
 API reference: https://n1mmwp.hamdocs.com/manual-windows/wsjt-x-decode-list-window/
 
-### 7. Ham Radio Deluxe (HRD) setup
+### 6. Ham Radio Deluxe (HRD) setup
 
 The bridge sends QSOs using HRD Logbook's **Network Server** TCP API (a plain-text
 `db add {FIELD="VALUE" ...}` command) — this is a different feature from HRD's
@@ -167,13 +176,14 @@ The bridge sends QSOs using HRD Logbook's **Network Server** TCP API (a plain-te
 > is stale for current versions — this implementation was reverse-engineered
 > from a real GridTracker-to-HRD capture, since that's what actually works.
 
-### 8. Log4OM v2 setup
+### 7. Log4OM v2 setup
 
 The bridge sends QSOs as plain ADIF records over UDP to Log4OM's inbound ADIF service.
 
 1. In Log4OM, go to **Communicator → Inbound Connections**
-2. Click **Add**, select type **ADIF**, and enter a port number (e.g. `2237`)
-3. Click the **+** button to activate the listener
+2. Click **Add**, select type **ADIF**, and enter a port number (e.g. `2234`)
+3. Click the **+** button to activate the listener, **then click Save** — it's
+   easy to miss, and the connection won't actually start listening until you do
 4. Set `host` and `port` in `config.ini` to match
 5. Set `enabled = true`
 
@@ -182,7 +192,7 @@ The bridge sends QSOs as plain ADIF records over UDP to Log4OM's inbound ADIF se
 
 API reference: Log4OM forum — Communicator > Inbound Connections > ADIF
 
-### 9. DXLab Suite DXKeeper setup
+### 8. DXLab Suite DXKeeper setup
 
 The bridge connects to DXKeeper's TCP port and issues an `externallog` command.
 
@@ -192,7 +202,35 @@ The bridge connects to DXKeeper's TCP port and issues an `externallog` command.
 3. Set `host` and `port` in `config.ini`
 4. Set `enabled = true`
 
+> **Note:** DXLab Suite runs on Windows only. The bridge can run on any
+> platform as long as DXKeeper is reachable over the network.
+
 API reference: https://www.dxlabsuite.com/Interoperation.htm
+
+### 9. MacLoggerDX setup
+
+> **Untested:** unlike the other five outputs, this one hasn't been verified
+> against a real running MacLoggerDX — it's built from MacLoggerDX's own
+> documentation only (Mac-only software, no Mac was available to test
+> against). N1MM and HRD both needed real bug fixes after their first
+> implementations despite following official-looking docs before they
+> actually worked, so treat this one the same way until it's been tested.
+
+The bridge sends QSOs as the same WSJT-X binary UDP messages used for N1MM (a
+"Log QSO" packet plus a "LoggedADIF" packet) — MacLoggerDX documents
+listening for this exact traffic from WSJT-X, JTDX, and JS8Call.
+
+1. In MacLoggerDX: **Station prefs**, enable the WSJT-X/JTDX/JS8Call UDP option
+2. Note the UDP port (default: `2237`, same as N1MM's default — if both run
+   on the same machine they'll need different ports)
+3. Set `host`, `port`, and `my_call` (your station callsign) in `config.ini`
+4. Set `enabled = true`
+
+> **Note:** MacLoggerDX runs on macOS only. The bridge (running on whatever
+> machine tails NetLogger's `Contacts.adi`) just needs to reach it over the
+> network.
+
+API reference: https://dogparksoftware.com/MacLoggerDX%20Help/mldxfc_wsjtx.html
 
 ---
 

@@ -150,7 +150,7 @@ enabled = false
 host = 127.0.0.1
 
 # UDP port (must match the Log4OM inbound ADIF connection port you configured)
-port = 2237
+port = 2234
 
 [dxkeeper]
 # Set enabled = true to forward contacts to DXLab Suite DXKeeper
@@ -162,6 +162,20 @@ host = 127.0.0.1
 
 # TCP port (DXKeeper default: 52001, which is base port 52000 + 1)
 port = 52001
+
+[macloggerdx]
+# Set enabled = true to forward contacts to MacLoggerDX
+# In MacLoggerDX: Station prefs, enable WSJT-X/JTDX/JS8Call UDP, note the port
+enabled = false
+
+# Hostname or IP of the Mac running MacLoggerDX
+host = 127.0.0.1
+
+# UDP port (MacLoggerDX default: 2237, same as N1MM's WSJT-X listener)
+port = 2237
+
+# Your station callsign (sent inside the WSJT-X Log QSO packet)
+my_call =
 """
 
 
@@ -369,7 +383,8 @@ def send_to_n3fjp(host: str, port: int, adif: str) -> bool:
 # Verified: datetime.date(1970,1,1).toordinal() + 1721425 == 2440588 (Qt epoch).
 _QTDATE_OFFSET  = 1721425
 _WSJTX_MAGIC    = 0xADBCCBDA
-_WSJTX_SCHEMA   = 3  # Qt 5.4+ schema
+_WSJTX_SCHEMA   = 2  # matches a real WSJT-X capture against N1MM+ 1.0.x; N1MM
+                      # appears to ignore packets declaring schema 3
 
 
 def _wsjtx_str(s: str) -> bytes:
@@ -378,9 +393,19 @@ def _wsjtx_str(s: str) -> bytes:
     return struct.pack(">I", len(enc)) + enc
 
 
+def _wsjtx_null() -> bytes:
+    """
+    Pack a *null* WSJT-X QByteArray (length -1), distinct from an empty one
+    (length 0, what `_wsjtx_str("")` produces). A real WSJT-X capture showed
+    every unset string field using length 0 except the trailing field, which
+    used -1 — replicated here rather than guessed at.
+    """
+    return struct.pack(">i", -1)
+
+
 def _wsjtx_datetime(dt_str: str) -> bytes:
     """
-    Pack a QDateTime in Qt schema-3 wire format.
+    Pack a QDateTime in WSJT-X wire format.
     Layout: qint64 Julian day + quint32 ms-since-midnight + quint8 time-spec (1=UTC).
     """
     try:
@@ -393,18 +418,16 @@ def _wsjtx_datetime(dt_str: str) -> bytes:
     return struct.pack(">qIB", jd, ms, 1)
 
 
-def send_to_n1mm(cfg: configparser.SectionProxy, adif: str) -> bool:
+def _build_wsjtx_qso_messages(adif: str, my_call: str) -> tuple[bytes, bytes]:
     """
-    Send QSO to N1MM Logger+ as a WSJT-X binary 'Log QSO' UDP packet (type 5).
-    N1MM receives it identically to a contact logged through WSJT-X/GridTracker.
-    In N1MM: Config > Configure Ports > WSJT-X tab, enable WSJT-X Decode List,
-    set UDP port to match [n1mm] port in config.ini.
-    Reference: https://github.com/roelandjansen/wsjt-x/blob/master/NetworkMessage.hpp
+    Build the WSJT-X 'Log QSO' (type 5) and 'LoggedADIF' (type 12) UDP
+    messages for one QSO. Shared by send_to_n1mm and send_to_macloggerdx,
+    which both consume the same real-world WSJT-X wire format — confirmed
+    for N1MM via a real WSJT-X-to-N1MM packet capture, which showed both
+    message types sent for a single logged QSO (some receivers key off one
+    or the other, so both are built here rather than guessing which one a
+    given receiver actually uses).
     """
-    host    = cfg.get("host", "127.0.0.1")
-    port    = cfg.getint("port", fallback=2237)
-    my_call = cfg.get("my_call", "")
-
     call     = extract_field(adif, "CALL")
     freq     = extract_field(adif, "FREQ")
     mode     = extract_field(adif, "MODE")
@@ -420,6 +443,8 @@ def send_to_n1mm(cfg: configparser.SectionProxy, adif: str) -> bool:
     rst_rcvd = rst_rcvd if rst_rcvd != "?" else ""
     name     = extract_field(adif, "NAME")
     name     = name if name != "?" else ""
+    operator = extract_field(adif, "OPERATOR")
+    operator = operator if operator != "?" else my_call
 
     try:
         freq_hz = int(float(freq) * 1_000_000) if freq and freq != "?" else 0
@@ -446,20 +471,80 @@ def send_to_n1mm(cfg: configparser.SectionProxy, adif: str) -> bool:
         + _wsjtx_str("")                          # Comments
         + _wsjtx_str(name)                        # Name
         + _wsjtx_datetime(_ts(qso_date, time_on)) # Date/Time On
-        + _wsjtx_str("")                          # Operator call
+        + _wsjtx_str(operator)                    # Operator call
         + _wsjtx_str(my_call)                     # My call
         + _wsjtx_str("")                          # My grid
         + _wsjtx_str("")                          # Exchange sent
         + _wsjtx_str("")                          # Exchange received
-        + _wsjtx_str("")                          # ADIF propagation mode (schema 3)
+        + _wsjtx_null()                           # ADIF propagation mode (unset)
     )
+
+    adif_blob = f"<ADIF_VER:5>3.1.0<PROGRAMID:16>NetLogger-Bridge<EOH>{adif}"
+    msg_adif = (
+        struct.pack(">III", _WSJTX_MAGIC, _WSJTX_SCHEMA, 12)  # header + type=12
+        + _wsjtx_str("WSJT-X")    # Id (client name)
+        + _wsjtx_str(adif_blob)   # ADIF text
+    )
+
+    return msg, msg_adif
+
+
+def send_to_n1mm(cfg: configparser.SectionProxy, adif: str) -> bool:
+    """
+    Send QSO to N1MM Logger+ as WSJT-X binary UDP messages: a structured
+    'Log QSO' packet (type 5) plus a 'LoggedADIF' packet (type 12) wrapping a
+    self-contained ADIF record, matching what a real WSJT-X capture showed it
+    sends for one logged QSO. In N1MM: Config > Configure Ports > WSJT-X tab,
+    enable WSJT-X Decode List, set UDP port to match [n1mm] port in
+    config.ini, then *fully restart N1MM* (the dialog warns changes need a
+    restart, and won't bind the listening socket until you do).
+    Reference: https://github.com/roelandjansen/wsjt-x/blob/master/NetworkMessage.hpp
+    """
+    host    = cfg.get("host", "127.0.0.1")
+    port    = cfg.getint("port", fallback=2237)
+    my_call = cfg.get("my_call", "")
+
+    msg, msg_adif = _build_wsjtx_qso_messages(adif, my_call)
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.sendto(msg, (host, port))
+            sock.sendto(msg_adif, (host, port))
         return True
     except (socket.error, OSError) as e:
         log.error(f"N1MM UDP error ({host}:{port}): {e}")
+        return False
+
+
+def send_to_macloggerdx(cfg: configparser.SectionProxy, adif: str) -> bool:
+    """
+    Send QSO to MacLoggerDX as WSJT-X binary UDP messages (same wire format
+    as send_to_n1mm — see _build_wsjtx_qso_messages). MacLoggerDX listens for
+    WSJT-X/JTDX/JS8Call broadcasts on UDP port 2237 by default (Station
+    prefs) and logs the 'QSO Logged' (type 5) message by default, or the
+    'Logged ADIF' (type 12) message instead if its "WSJT-X Log ADIF"
+    checkbox (Log prefs) is checked — both are sent here so either setting
+    works without needing to match it.
+
+    UNVERIFIED: built from MacLoggerDX's own documentation only; unlike the
+    other five outputs, this hasn't been tested against a real install
+    (Mac-only software, no Mac available when this was written). Treat as
+    more likely than the others to need a fix once actually tested.
+    Reference: https://dogparksoftware.com/MacLoggerDX%20Help/mldxfc_wsjtx.html
+    """
+    host    = cfg.get("host", "127.0.0.1")
+    port    = cfg.getint("port", fallback=2237)
+    my_call = cfg.get("my_call", "")
+
+    msg, msg_adif = _build_wsjtx_qso_messages(adif, my_call)
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.sendto(msg, (host, port))
+            sock.sendto(msg_adif, (host, port))
+        return True
+    except (socket.error, OSError) as e:
+        log.error(f"MacLoggerDX UDP error ({host}:{port}): {e}")
         return False
 
 
@@ -574,13 +659,14 @@ def send_to_dxkeeper(host: str, port: int, adif: str) -> bool:
     Send QSO to DXKeeper via its TCP externallog command.
     DXKeeper listens on base_port + 1 (default 52001).
     Message format uses DXLab ADIF field encoding:
-      <command:11>externallog<parameters:N><ExternalLogADIF:M>[adif fields]
+      <command:11>externallog<parameters:N><ExternalLogADIF:M>[adif fields incl. <EOR>]
+    DXLab's own documented example keeps the trailing <EOR> inside
+    ExternalLogADIF's length-prefixed payload; an earlier version of this
+    function stripped it, leaving an incomplete ADIF record that DXKeeper
+    silently refused to log ("could not be logged:" with no reason given).
     Reference: https://www.dxlabsuite.com/Interoperation.htm
     """
-    # DXKeeper expects ADIF fields without the trailing <EOR>
-    adif_fields = adif
-    if adif_fields.upper().endswith("<EOR>"):
-        adif_fields = adif_fields[:-5].rstrip()
+    adif_fields = adif if adif.upper().endswith("<EOR>") else adif.rstrip() + "<EOR>"
 
     M      = len(adif_fields.encode("utf-8"))
     params = f"<ExternalLogADIF:{M}>{adif_fields}"
@@ -611,12 +697,13 @@ def send_to_dxkeeper(host: str, port: int, adif: str) -> bool:
 # ---------------------------------------------------------------------------
 
 SERVICE_LABELS = {
-    "wavelog":  "WaveLog",
-    "n3fjp":    "N3FJP",
-    "n1mm":     "N1MM",
-    "hrd":      "HRD",
-    "log4om":   "Log4OM",
-    "dxkeeper": "DXKeeper",
+    "wavelog":     "WaveLog",
+    "n3fjp":       "N3FJP",
+    "n1mm":        "N1MM",
+    "hrd":         "HRD",
+    "log4om":      "Log4OM",
+    "dxkeeper":    "DXKeeper",
+    "macloggerdx": "MacLoggerDX",
 }
 
 
@@ -633,9 +720,10 @@ def send_to_services(cfg: configparser.ConfigParser, adif: str, enabled: dict, o
         "n1mm":     lambda: send_to_n1mm(cfg["n1mm"], adif),
         "hrd":      lambda: send_to_hrd(cfg["hrd"], adif),
         "log4om":   lambda: send_to_log4om(cfg["log4om"].get("host", "127.0.0.1"),
-                                            cfg["log4om"].getint("port", fallback=2237), adif),
+                                            cfg["log4om"].getint("port", fallback=2234), adif),
         "dxkeeper": lambda: send_to_dxkeeper(cfg["dxkeeper"].get("host", "127.0.0.1"),
                                               cfg["dxkeeper"].getint("port", fallback=52001), adif),
+        "macloggerdx": lambda: send_to_macloggerdx(cfg["macloggerdx"], adif),
     }
     results = {}
     for name, sender in senders.items():
@@ -779,12 +867,13 @@ def run(config_path: str = "config.ini", stop_event=None):
     adi_path        = find_adi_file(general.get("contacts_adi", ""))
 
     enabled = {
-        "wavelog":  cfg.getboolean("wavelog",  "enabled", fallback=False),
-        "n3fjp":    cfg.getboolean("n3fjp",    "enabled", fallback=False),
-        "n1mm":     cfg.getboolean("n1mm",     "enabled", fallback=False),
-        "hrd":      cfg.getboolean("hrd",      "enabled", fallback=False),
-        "log4om":   cfg.getboolean("log4om",   "enabled", fallback=False),
-        "dxkeeper": cfg.getboolean("dxkeeper", "enabled", fallback=False),
+        "wavelog":     cfg.getboolean("wavelog",     "enabled", fallback=False),
+        "n3fjp":       cfg.getboolean("n3fjp",       "enabled", fallback=False),
+        "n1mm":        cfg.getboolean("n1mm",        "enabled", fallback=False),
+        "hrd":         cfg.getboolean("hrd",         "enabled", fallback=False),
+        "log4om":      cfg.getboolean("log4om",      "enabled", fallback=False),
+        "dxkeeper":    cfg.getboolean("dxkeeper",    "enabled", fallback=False),
+        "macloggerdx": cfg.getboolean("macloggerdx", "enabled", fallback=False),
     }
 
     if not any(enabled.values()):
