@@ -327,6 +327,8 @@ class App(tk.Tk):
         self._add_entry(general, "poll_interval", "Poll interval (seconds)")
         self._add_entry(general, "contacts_adi", "Contacts.adi path (blank = auto-detect)")
         self._add_entry(general, "state_file", "State file")
+        self._add_entry(general, "retry_interval_minutes", "Retry interval (minutes)")
+        self._add_entry(general, "retry_give_up_days", "Give up retrying after (days)")
         self._add_entry(general, "my_call", "My callsign")
 
         notebook = ttk.Notebook(self)
@@ -420,6 +422,8 @@ class App(tk.Tk):
         self.vars["poll_interval"].set(general.get("poll_interval", "10"))
         self.vars["contacts_adi"].set(general.get("contacts_adi", ""))
         self.vars["state_file"].set(general.get("state_file", "forwarded_qsos.txt"))
+        self.vars["retry_interval_minutes"].set(general.get("retry_interval_minutes", "60"))
+        self.vars["retry_give_up_days"].set(general.get("retry_give_up_days", "5"))
         n1mm_call = self.cfg["n1mm"].get("my_call", "")
         hrd_call = self.cfg["hrd"].get("my_call", "")
         macloggerdx_call = self.cfg["macloggerdx"].get("my_call", "")
@@ -466,6 +470,8 @@ class App(tk.Tk):
         general["poll_interval"] = self.vars["poll_interval"].get()
         general["contacts_adi"] = self.vars["contacts_adi"].get()
         general["state_file"] = self.vars["state_file"].get()
+        general["retry_interval_minutes"] = self.vars["retry_interval_minutes"].get()
+        general["retry_give_up_days"] = self.vars["retry_give_up_days"].get()
 
         wavelog = self.cfg["wavelog"]
         wavelog["enabled"] = "true" if self.vars["wavelog_enabled"].get() else "false"

@@ -86,6 +86,13 @@ contacts_adi =
 # File used to track which contacts have already been forwarded, between restarts
 state_file = forwarded_qsos.txt
 
+# Minutes to wait before retrying a contact that failed to forward to one or
+# more enabled outputs
+retry_interval_minutes = 60
+
+# Days to keep retrying a failed contact before giving up on it permanently
+retry_give_up_days = 5
+
 [wavelog]
 # Set enabled = true to forward contacts to WaveLog
 enabled = false
@@ -738,10 +745,6 @@ def send_to_services(cfg: configparser.ConfigParser, adif: str, enabled: dict, o
 # State persistence (per-contact, per-service forwarding status)
 # ---------------------------------------------------------------------------
 
-RETRY_INTERVAL       = datetime.timedelta(hours=1)
-RETRY_GIVE_UP_AFTER  = datetime.timedelta(days=5)
-
-
 def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -763,7 +766,7 @@ def load_state(state_file: str) -> dict:
     Each record is a dict of {service_name: success_bool} for whichever
     services were attempted, plus "first_attempt"/"last_attempt" (ISO UTC)
     once a retry is pending, and "gave_up": True once retries are abandoned
-    after RETRY_GIVE_UP_AFTER. A fully-successful record has no extra keys.
+    after the configured retry_give_up_days. A fully-successful record has no extra keys.
 
     A missing file means 'never run before' (initialized=False), causing the
     caller to silently seed from the current file rather than forward
@@ -875,6 +878,8 @@ def run(config_path: str = "config.ini", stop_event=None):
     poll_interval   = general.getint("poll_interval", fallback=10)
     state_file      = str(resolve_path(general.get("state_file", "forwarded_qsos.txt")))
     adi_path        = find_adi_file(general.get("contacts_adi", ""))
+    retry_interval  = datetime.timedelta(minutes=general.getint("retry_interval_minutes", fallback=60))
+    retry_give_up   = datetime.timedelta(days=general.getint("retry_give_up_days", fallback=5))
 
     enabled = {
         "wavelog":     cfg.getboolean("wavelog",     "enabled", fallback=False),
@@ -940,8 +945,8 @@ def run(config_path: str = "config.ini", stop_event=None):
                     save_state(state_file, records)
                     continue
 
-                # Previously attempted but incomplete — retry hourly, give up after 5 days
-                if now - _parse_iso(record["last_attempt"]) < RETRY_INTERVAL:
+                # Previously attempted but incomplete — retry on retry_interval, give up after retry_give_up
+                if now - _parse_iso(record["last_attempt"]) < retry_interval:
                     continue
 
                 failed = {name for name in SERVICE_LABELS if record.get(name) is False}
@@ -951,9 +956,9 @@ def run(config_path: str = "config.ini", stop_event=None):
                 if all(record.get(name, True) for name in SERVICE_LABELS):
                     record.pop("first_attempt", None)
                     record.pop("last_attempt", None)
-                elif now - _parse_iso(record["first_attempt"]) >= RETRY_GIVE_UP_AFTER:
+                elif now - _parse_iso(record["first_attempt"]) >= retry_give_up:
                     still = sorted(name for name in SERVICE_LABELS if record.get(name) is False)
-                    log.warning(f"Giving up on {callsign} {band} {mode} after 5 days — never reached: {', '.join(still)}")
+                    log.warning(f"Giving up on {callsign} {band} {mode} after {retry_give_up.days} day(s) — never reached: {', '.join(still)}")
                     record["gave_up"] = True
                 else:
                     record["last_attempt"] = _now_iso()

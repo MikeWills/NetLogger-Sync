@@ -191,7 +191,7 @@ polling loop in `run()`:
    failed service still being retried — see the main loop below. Deleting a
    contact's line by hand and restarting the bridge forces a full re-send to
    every enabled service; this is the supported way to re-log a fixed-up QSO
-   or retry sooner than the hourly schedule. `_is_done(record)` is `True` once
+   or retry sooner than `retry_interval_minutes`. `_is_done(record)` is `True` once
    every service it was attempted against succeeded, or `"gave_up"` is set —
    used to decide whether a contact needs any further attention at all.
    `load_state` treats a missing file as `initialized: False` and migrates
@@ -202,7 +202,11 @@ polling loop in `run()`:
    `QSO_DATE|TIME_ON|CALL|BAND` line (the original dedup-key-only format) has
    no `"key"`-bearing JSON to extract, and a short-lived JSON-dict version
    (`{"initialized": ..., "keys": {key: qso_date}}`) has its `"keys"` mapped to
-   `{}` directly. `--reset-state` (handled in the entry point, not via `run()`)
+   `{}` directly. A record from a version predating retry-tracking can also
+   have a `False` service result with no `first_attempt`/`last_attempt` at
+   all; `load_state` backfills both to the current time for any such
+   not-done record rather than letting `run()` crash on the missing keys.
+   `--reset-state` (handled in the entry point, not via `run()`)
    calls `reset_state()`, which uses `_seed_keys_from_existing()` to mark every
    contact currently in the file as forwarded *without sending any of them*, so
    a restarted bridge only forwards QSOs logged from that point on.
@@ -221,13 +225,14 @@ polling loop in `run()`:
    - no existing record, or `_is_done()` — handled as before (skip, or send to
      every enabled service via `send_to_services()` and store the per-service
      results, with `first_attempt`/`last_attempt` added only if something failed).
-   - an existing, not-done record — skipped unless `RETRY_INTERVAL` (1 hour) has
-     elapsed since `last_attempt`, then retried via `send_to_services(..., only=
-     {failed service names})`. If everything now succeeds, the timestamps are
-     dropped; if `RETRY_GIVE_UP_AFTER` (5 days) has elapsed since
-     `first_attempt`, a warning is logged and `"gave_up": true` is set instead
-     of retrying further; otherwise `last_attempt` is bumped and it's retried
-     again next hour.
+   - an existing, not-done record — skipped unless `retry_interval_minutes`
+     (`[general]` in `config.ini`, default 60) has elapsed since `last_attempt`,
+     then retried via `send_to_services(..., only={failed service names})`. If
+     everything now succeeds, the timestamps are dropped; if
+     `retry_give_up_days` (default 5) has elapsed since `first_attempt`, a
+     warning is logged and `"gave_up": true` is set instead of retrying
+     further; otherwise `last_attempt` is bumped and it's retried again next
+     interval.
 
    After the per-record loop, `prune_records` drops any record not in
    `current_keys` (i.e. its QSO is gone from the file). While running, the
