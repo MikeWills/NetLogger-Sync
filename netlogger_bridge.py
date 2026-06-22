@@ -804,6 +804,16 @@ def load_state(state_file: str) -> dict:
             key, obj = line, {}
         records[key] = obj
 
+    # Records written by versions predating retry-tracking can have a
+    # False service result with no "first_attempt"/"last_attempt" — backfill
+    # both to now so run() retries them on its own schedule instead of
+    # crashing on the missing keys.
+    ts = _now_iso()
+    for record in records.values():
+        if not _is_done(record) and "last_attempt" not in record:
+            record.setdefault("first_attempt", ts)
+            record["last_attempt"] = ts
+
     return {"initialized": True, "records": records}
 
 
