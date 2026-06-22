@@ -59,6 +59,8 @@ This creates `config.ini`. Edit it:
 poll_interval = 10          # seconds between file polls
 contacts_adi =               # leave blank to auto-detect
 state_file = forwarded_qsos.txt
+retry_interval_minutes = 60  # how often to retry a contact that failed to forward
+retry_give_up_days = 5       # days to keep retrying before giving up on a contact
 
 [wavelog]
 enabled = true
@@ -266,20 +268,22 @@ re-send anything. Each line records which enabled outputs succeeded, e.g.:
 {"key": "20260618|031552|KE9ESR|80M", "wavelog": true, "n3fjp": false, "first_attempt": "2026-06-18T03:15:52Z", "last_attempt": "2026-06-18T03:15:52Z"}
 ```
 
-A contact with any `false` output is retried automatically once an hour for
-up to 5 days (handling a logger or web service being briefly unreachable);
-once everything succeeds, the timestamps are dropped and the line shrinks to
-just the per-output results. If an output still hasn't succeeded after 5
-days, the bridge stops retrying and adds `"gave_up": true` so you can spot it
-later — search the file for `false` or `gave_up` to find contacts that never
-fully made it out.
+A contact with any `false` output is retried automatically every
+`retry_interval_minutes` (default 60) for up to `retry_give_up_days` (default
+5) — both configurable in `[general]` in `config.ini` — handling a logger or
+web service being briefly unreachable. Once everything succeeds, the
+timestamps are dropped and the line shrinks to just the per-output results.
+If an output still hasn't succeeded once `retry_give_up_days` has elapsed,
+the bridge stops retrying and adds `"gave_up": true` so you can spot it later
+— search the file for `false` or `gave_up` to find contacts that never fully
+made it out.
 
 A line's entry is only dropped once its contact is no longer found in
 `Contacts.adi` (i.e. you deleted it in NetLogger), keeping the state file in
 sync with what's actually still logged.
 
 To force a specific contact to be re-sent to *every* enabled output (e.g. you
-fixed it in NetLogger, or want to retry sooner than the hourly schedule),
+fixed it in NetLogger, or want to retry sooner than `retry_interval_minutes`),
 stop the bridge, find and delete its line in `forwarded_qsos.txt`, then start
 the bridge again — it'll forward just that one contact on the next poll.
 
