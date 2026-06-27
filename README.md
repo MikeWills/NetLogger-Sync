@@ -1,13 +1,13 @@
 # NetLogger Bridge
 
-Tails NetLogger's `Contacts.adi` file and forwards new QSOs in real-time to:
-- **WaveLog** — via HTTP REST API
-- **N3FJP AC Log** — via its TCP server
-- **N1MM Logger+** — via WSJT-X binary UDP "Log QSO" packet (same as GridTracker2)
-- **Ham Radio Deluxe (HRD) Logbook** — via its Network Server TCP API
-- **Log4OM v2** — via UDP inbound ADIF
-- **DXLab Suite DXKeeper** — via TCP `externallog` command
-- **MacLoggerDX** — via WSJT-X binary UDP "Log QSO" packet, same as N1MM (Mac-only; untested, see setup section below)
+Reads NetLogger's `Contacts.adi` file and forwards new QSOs in near real-time to:
+- **WaveLog**
+- **N3FJP AC Log**
+- **N1MM Logger+**
+- **Ham Radio Deluxe (HRD) Logbook**
+- **Log4OM v2**
+- **DXLab Suite DXKeeper**
+- **MacLoggerDX** (Mac-only; untested, see setup section below)
 
 Any combination of outputs can be enabled independently.
 
@@ -29,11 +29,16 @@ A command-line `netlogger_bridge` executable is also included for running
 without the GUI (e.g. as a background service — see below).
 
 This is the recommended option for club members who don't have Python installed.
-The sections below describe the Python-based setup, used for development.
+For the nerds, the sections below describe the Python-based setup, used for development.
 
 ---
 
 ## Requirements
+
+**If using the pre-built executables (Easy Install above):** no requirements —
+Python and all dependencies are bundled.
+
+**If running from source:**
 
 - Python 3.10+
 - `requests` library
@@ -46,13 +51,19 @@ pip install requests
 
 ## Setup
 
-### 1. Generate config
+### 1. Configure
+
+**GUI (`netlogger_gui.py`):** No pre-setup needed — the GUI loads built-in
+defaults on first launch. Fill in your settings and click **Save Config**;
+this creates `config.ini` in the same directory.
+
+**CLI (`netlogger_bridge.py`):** Generate a starter `config.ini` first:
 
 ```bash
 python netlogger_bridge.py --create-config
 ```
 
-This creates `config.ini`. Edit it:
+Either way, the file looks like this:
 
 ```ini
 [general]
@@ -131,14 +142,11 @@ API reference: https://docs.wavelog.org/developer/api/
 
 ### 4. N3FJP setup
 
-1. In N3FJP AC Log, go to **Settings → Application Program Interface (API)**
+1. In N3FJP AC Log, go to **Settings → Application Program Interface (API)...**
 2. Check **TCP API Enabled (Server)**
 3. Note the port (default: `1100`)
 4. Set `host` and `port` in `config.ini`
 5. Set `enabled = true`
-
-> **Note:** N3FJP AC Log runs on Windows only. The bridge client can run
-> on any platform, but N3FJP must be reachable over the network.
 
 API reference: http://www.n3fjp.com/help/api.html
 
@@ -147,47 +155,35 @@ API reference: http://www.n3fjp.com/help/api.html
 The bridge sends QSOs as WSJT-X binary UDP messages (a "Log QSO" packet plus
 a "LoggedADIF" packet) — the same method used by GridTracker2 and JTAlert.
 
-1. In N1MM: **Config → Configure Ports → WSJT-X tab**
-2. Check **Enable** under Radio #1 Settings
+1. In N1MM: **Config → Configure Ports, Mode Control, Winkey, etc...  → WSJT/JTDX Setup tab**
+2. Check **Enable** under WSJT-X and JTDX UDP Settings → Radio #1 Settings
 3. Note the UDP port (default: `2237`)
 4. Set `host`, `port`, and `my_call` (your station callsign) in `config.ini`
 5. Set `enabled = true`
 6. **Fully restart N1MM+** — the dialog warns changes need a restart, and it
    won't actually open the listening socket until you do
 
-> **Note:** N1MM Logger+ runs on Windows only.
-
 API reference: https://n1mmwp.hamdocs.com/manual-windows/wsjt-x-decode-list-window/
 
 ### 6. Ham Radio Deluxe (HRD) setup
 
-The bridge sends QSOs using HRD Logbook's **Network Server** TCP API (a plain-text
-`db add {FIELD="VALUE" ...}` command) — this is a different feature from HRD's
-"QSO Forwarding" (which is UDP and not used here).
-
-1. In HRD Logbook, go to **Tools → Network Server**
+1. In HRD Logbook, go to **Tools → Configure → Network Server**
 2. Ensure **Autostart** is checked, and note the command port on the Logbook
    tab (`7826` by default in recent HRD versions)
 3. Set `host`, `port`, and `my_call` (fallback callsign, only used if a
    contact's ADIF record has no `Station_Callsign` of its own) in `config.ini`
 4. Set `enabled = true`
 
-> **Note:** HRD Logbook is Windows-only commercial software. The bridge can
-> run on any platform as long as HRD is reachable over the network.
-> HRD's documented API syntax (a quoted database name before the field list)
-> is stale for current versions — this implementation was reverse-engineered
-> from a real GridTracker-to-HRD capture, since that's what actually works.
-
 ### 7. Log4OM v2 setup
 
 The bridge sends QSOs as plain ADIF records over UDP to Log4OM's inbound ADIF service.
 
-1. In Log4OM, go to **Communicator → Inbound Connections**
-2. Click **Add**, select type **ADIF**, and enter a port number (e.g. `2234`)
-3. Click the **+** button to activate the listener, **then click Save** — it's
-   easy to miss, and the connection won't actually start listening until you do
-4. Set `host` and `port` in `config.ini` to match
-5. Set `enabled = true`
+1. In Log4OM, go to **Settings → Program Configuration → Software integration → Connections**
+2. Select **UDP*** then click **Add new item** (plus sign)
+3. Click on the "JTDX/WSJT ADIF" preset.
+4. Then **click Save** — it's easy to miss, and the connection won't actually start listening until you do
+5. Set `host` and `port` in `config.ini` to match
+6. Set `enabled = true`
 
 > **Note:** The port is freely configurable — pick any unused port and make
 > sure Log4OM's inbound connection uses the same number.
@@ -199,13 +195,10 @@ API reference: Log4OM forum — Communicator > Inbound Connections > ADIF
 The bridge connects to DXKeeper's TCP port and issues an `externallog` command.
 
 1. Ensure DXKeeper is running
-2. Note the base port: in DXKeeper go to **Config → Ports**; DXKeeper listens on
+2. Note the base port: in DXKeeper go to **Config → Defaults → Network Service**; DXKeeper listens on
    **base port + 1** (default base is `52000`, so DXKeeper uses `52001`)
 3. Set `host` and `port` in `config.ini`
 4. Set `enabled = true`
-
-> **Note:** DXLab Suite runs on Windows only. The bridge can run on any
-> platform as long as DXKeeper is reachable over the network.
 
 API reference: https://www.dxlabsuite.com/Interoperation.htm
 
@@ -227,10 +220,6 @@ listening for this exact traffic from WSJT-X, JTDX, and JS8Call.
    on the same machine they'll need different ports)
 3. Set `host`, `port`, and `my_call` (your station callsign) in `config.ini`
 4. Set `enabled = true`
-
-> **Note:** MacLoggerDX runs on macOS only. The bridge (running on whatever
-> machine tails NetLogger's `Contacts.adi`) just needs to reach it over the
-> network.
 
 API reference: https://dogparksoftware.com/MacLoggerDX%20Help/mldxfc_wsjtx.html
 
