@@ -8,6 +8,7 @@ Reads NetLogger's `Contacts.adi` file and forwards new QSOs in near real-time to
 - **Log4OM v2**
 - **DXLab Suite DXKeeper**
 - **MacLoggerDX** (Mac-only; untested, see setup section below)
+- **K1ALF OMISS Awards Tracker** (k1alf.com; only forwards contacts logged under NetLogger's OMISS club)
 
 Any combination of outputs can be enabled independently.
 
@@ -111,6 +112,11 @@ enabled = false
 host = 127.0.0.1
 port = 2237
 my_call = W1AW
+
+[k1alf_omiss_awards]
+enabled = false
+call_sign = W1AW
+password = YOUR_K1ALF_OMISS_AWARDS_PASSWORD
 ```
 
 ### 2. NetLogger Contacts.adi auto-detection
@@ -222,6 +228,23 @@ listening for this exact traffic from WSJT-X, JTDX, and JS8Call.
 4. Set `enabled = true`
 
 API reference: https://dogparksoftware.com/MacLoggerDX%20Help/mldxfc_wsjtx.html
+
+### 10. K1ALF OMISS Awards Tracker setup
+
+The [OMISS Awards Tracker](https://k1alf.com/omiss_awards/) has no API — the
+bridge logs in and uploads a one-record CSV per QSO the same way you'd
+manually upload a NetLogger export through its **Call Log → Log Import**
+page. Only contacts logged under NetLogger's **OMISS** club are sent; every
+other club/net is silently skipped, since the site rejects anything else as
+"not OMISS related".
+
+1. Register/log in once at https://k1alf.com/omiss_awards/ if you haven't already
+2. Set `call_sign` and `password` in `config.ini` to your login for that site
+3. Set `enabled = true`
+
+Your station type (Base/Mobile/Portable) for each upload is read automatically
+from the same per-QSO setting NetLogger itself records — there's nothing to
+configure for it.
 
 ---
 
