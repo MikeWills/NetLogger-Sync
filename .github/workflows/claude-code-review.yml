@@ -50,6 +50,7 @@ jobs:
           # unstructured, incomplete manual review via raw gh/Bash calls instead.
           claude_args: |
             --allowedTools "Skill,Bash(gh pr comment:*),mcp__github_inline_comment__*"
+          show_full_output: true
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
