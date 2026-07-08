@@ -38,19 +38,18 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} --comment'
+          prompt: '/code-review:code-review ${{ github.event.pull_request.number }} --comment'
           # mcp__github_inline_comment__* (inline findings) and the gh pr comment
           # Bash pattern (the "no issues found" summary comment) are both
           # publish-type actions Claude Code's own permission system requires
           # explicit allowlisting for — without this, --comment above silently
           # has nothing to post with, separately from the workflow's GITHUB_TOKEN
-          # permissions block above.
+          # permissions block above. Skill must be allowlisted too, or the very
+          # first call — invoking code-review:code-review itself — gets denied
+          # (observed via show_full_output: true) and Claude falls back to an
+          # unstructured, incomplete manual review via raw gh/Bash calls instead.
           claude_args: |
-            --allowedTools "Bash(gh pr comment:*),mcp__github_inline_comment__*"
-          # TEMPORARY debug aid — see whether the plugin decides not to post
-          # anything on a clean review, or is still hitting some other
-          # silent failure. Revert once diagnosed.
-          show_full_output: true
+            --allowedTools "Skill,Bash(gh pr comment:*),mcp__github_inline_comment__*"
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
