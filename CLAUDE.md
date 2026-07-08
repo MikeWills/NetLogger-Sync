@@ -60,7 +60,7 @@ since `LogonTrigger` alone wouldn't fire until the next logon.
 `_toggle_autostart` only calls this if `get_running_bridge_pid()` is `None`,
 to avoid starting a duplicate instance.
 
-Always update the readme with relavant changes. Always do a security check. Always review project for unused code an remove.
+Always update the readme with relevant changes. Always do a security check. Always review project for unused code and remove.
 
 `config.ini` is the user's local runtime config (contains live API keys/host info) and
 is gitignored. Do not read, edit, or otherwise touch it unless the user explicitly asks.
