@@ -19,6 +19,7 @@ ADIF log file for newly appended QSO records and forwards each one to:
 - **Log4OM v2** via UDP inbound ADIF (plain ADIF record datagram, user-configured port)
 - **DXLab Suite DXKeeper** via TCP `externallog` command on port 52001
 - **MacLoggerDX** via the same WSJT-X binary UDP packets as N1MM, on port 2237 (Mac-only; unverified — no Mac was available to test against real software)
+- **K1ALF OMISS Awards Tracker** (k1alf.com) via a reverse-engineered login + CSV upload (there is no API); only contacts logged under NetLogger's OMISS club are sent
 
 Any combination of outputs can be enabled independently via `config.ini`.
 
@@ -102,7 +103,7 @@ polling loop in `run()`:
 
 1. **Config** (`load_config`, `create_sample_config`) — `configparser`-based, sections
    `[general]`, `[wavelog]`, `[n3fjp]`, `[n1mm]`, `[hrd]`, `[log4om]`, `[dxkeeper]`,
-   `[macloggerdx]`.
+   `[macloggerdx]`, `[k1alf_omiss_awards]`.
 2. **ADI file location** (`find_adi_file`, `ADI_PATHS`) — locates NetLogger's
    `Contacts.adi`, auto-detecting an OS-specific default path if `contacts_adi` is blank.
 3. **ADIF file tailer** (`read_all_records`, `normalize_adif`, `extract_field`,
@@ -119,13 +120,14 @@ polling loop in `run()`:
    to decide whether a record has already been forwarded — see state persistence
    below).
 4. **Output senders** (`send_to_wavelog`, `send_to_n3fjp`, `send_to_n1mm`,
-   `send_to_hrd`, `send_to_log4om`, `send_to_dxkeeper`, `send_to_macloggerdx`) —
+   `send_to_hrd`, `send_to_log4om`, `send_to_dxkeeper`, `send_to_macloggerdx`,
+   `send_to_k1alf_omiss_awards`) —
    each takes a built ADIF record string and pushes it to one destination,
    returning a bool success flag. `send_to_services` (in the "Output
-   dispatch" section) wraps all seven behind a single `{service_name:
+   dispatch" section) wraps all eight behind a single `{service_name:
    sender_fn}` table, keyed by the same short names used throughout state
    persistence (`wavelog`, `n3fjp`, `n1mm`, `hrd`, `log4om`, `dxkeeper`,
-   `macloggerdx`) and `SERVICE_LABELS` (their display names for logging, e.g.
+   `macloggerdx`, `k1alf_omiss_awards`) and `SERVICE_LABELS` (their display names for logging, e.g.
    `"n3fjp" -> "N3FJP"`). It takes an `only` set so the same function serves both
    a first attempt (every enabled service) and a retry (just the services that
    previously failed for that contact) — see state persistence below.
@@ -175,7 +177,42 @@ polling loop in `run()`:
    example keeps `<EOR>` inside that length-prefixed payload; stripping it (an
    earlier version of this function did) leaves an incomplete ADIF record
    that DXKeeper silently refuses with "could not be logged:" and no reason
-   given.
+   given. `send_to_k1alf_omiss_awards` is the one output with no API at
+   all — the [K1ALF OMISS Awards Tracker](https://k1alf.com/omiss_awards/)
+   only accepts a NetLogger-format CSV upload behind a login, so both the
+   login (`POST process.php {call_sign, password, login=Submit}`) and the
+   upload (`POST process.php` multipart with `MAX_FILE_SIZE`, `my_end`
+   (0/1/2 = Base/Mobile/Portable), `file_upload`, `import=Submit`) were
+   reverse-engineered from the live site rather than any documented API —
+   including the login form itself, whose markup is broken (the `<form>` is
+   opened as a direct child of a `<tr>`, so its actual `<input>` fields are
+   DOM siblings rather than descendants; verified via `input.form` in a real
+   browser that this still works, since HTML5's "form pointer" parsing
+   associates trailing orphan inputs with the last-opened form regardless of
+   DOM nesting). A `requests.Session()` is kept at module scope
+   (`_k1alf_session`) so login happens once per bridge run rather than once
+   per QSO, and is transparently retried once if a session is ever found to
+   have expired (detected by the response no longer containing "Log Out").
+   `build_k1alf_omiss_csv` builds the one-record CSV itself, whose column
+   layout was reverse-engineered by diffing a real NetLogger CSV export
+   against the matching raw `Contacts.adi` records for the same QSOs (the
+   site rejects ADIF outright: "ADIF files will not upload correctly") —
+   two columns don't map straightforwardly from ADIF field names: `His_RST`/
+   `My_RST` are swapped from what their names suggest (confirmed against two
+   real records that `His_RST` is `RST_Rcvd` and `My_RST` is `RST_Sent`), and
+   `Remarks` is synthesized as `#{App_NetLogger_ClubMemberId}#` plus a
+   trailing ` {Comment}` if NetLogger recorded one, rather than being a
+   single ADIF field. Only contacts logged under NetLogger's OMISS club
+   (`App_NetLogger_Club` = `OMISS`) are actually sent — NetLogger tracks
+   contacts across many unrelated clubs/nets (separate folders under its
+   data directory), and the site rejects anything else as "not OMISS
+   related", so `send_to_k1alf_omiss_awards` treats a non-OMISS contact as
+   trivially done (returns `True` without sending) rather than uploading and
+   letting it fail. Success is detected by parsing "`N` records were new" /
+   "`N` records were duplicates" out of the response body (a duplicate still
+   counts as success, since it means the contact is already tracked
+   server-side) rather than matching on the "File uploaded sucessfully."
+   text, since that string's typo is presumably not something to depend on.
 5. **State persistence** (`load_state`, `save_state`, `prune_records`,
    `_seed_keys_from_existing`, `reset_state`, `_is_done`) — tracks per-contact,
    per-service forwarding status by `record_dedup_key`, not file position,
@@ -249,10 +286,11 @@ polling loop in `run()`:
 - The tailer operates on raw bytes/text — it does not parse NetLogger's ADIF fields
   beyond pulling `Call`/`Band`/`Mode` for log messages via `extract_field`. Records
   are forwarded as-is (with `<EOR>` re-appended) to WaveLog, N3FJP, Log4OM, and
-  DXKeeper. The N1MM, HRD, and MacLoggerDX senders instead extract individual
-  fields (`CALL`, `FREQ`, `QSO_DATE`, `TIME_ON`, `RST_SENT`, `RST_RCVD`, etc.)
-  to build their own wire formats (a WSJT-X binary packet for N1MM/MacLoggerDX,
-  a `db add` text command for HRD) rather than forwarding the ADIF string directly.
+  DXKeeper. The N1MM, HRD, MacLoggerDX, and K1ALF OMISS Awards senders instead
+  extract individual fields (`CALL`, `FREQ`, `QSO_DATE`, `TIME_ON`, `RST_SENT`,
+  `RST_RCVD`, etc.) to build their own wire formats (a WSJT-X binary packet for
+  N1MM/MacLoggerDX, a `db add` text command for HRD, a one-record CSV for K1ALF
+  OMISS Awards) rather than forwarding the ADIF string directly.
 - `read_all_records` only includes *complete* records (i.e. those followed by
   `<eor>`); a partially-written trailing record is left for the next poll. This
   also makes seeding (first run / `--reset-state`) safe against NetLogger being
