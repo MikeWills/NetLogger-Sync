@@ -377,6 +377,12 @@ class App(tk.Tk):
         self._add_entry(macloggerdx, "macloggerdx_host", "Host")
         self._add_entry(macloggerdx, "macloggerdx_port", "Port")
 
+        k1alf_omiss_awards = ttk.Frame(notebook)
+        notebook.add(k1alf_omiss_awards, text="K1ALF OMISS Awards")
+        self._add_checkbox(k1alf_omiss_awards, "k1alf_omiss_awards_enabled", "Enable K1ALF OMISS Awards Tracker")
+        self._add_entry(k1alf_omiss_awards, "k1alf_omiss_awards_call_sign", "Call sign")
+        self._add_entry(k1alf_omiss_awards, "k1alf_omiss_awards_password", "Password", secret=True)
+
         buttons = ttk.Frame(self)
         buttons.pack(fill="x", padx=10, pady=5)
         ttk.Button(buttons, text="Save Config", command=self._save_config).pack(side="left")
@@ -401,12 +407,13 @@ class App(tk.Tk):
         self.log_text = scrolledtext.ScrolledText(log_frame, state="disabled", height=16)
         self.log_text.pack(fill="both", expand=True)
 
-    def _add_entry(self, parent, key, label):
+    def _add_entry(self, parent, key, label, secret=False):
         row = ttk.Frame(parent)
         row.pack(fill="x", padx=5, pady=2)
         ttk.Label(row, text=label, width=32).pack(side="left")
         var = tk.StringVar()
-        ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
+        entry = ttk.Entry(row, textvariable=var, show="*" if secret else "")
+        entry.pack(side="left", fill="x", expand=True)
         self.vars[key] = var
 
     def _add_checkbox(self, parent, key, label):
@@ -465,6 +472,11 @@ class App(tk.Tk):
         self.vars["macloggerdx_host"].set(macloggerdx.get("host", "127.0.0.1"))
         self.vars["macloggerdx_port"].set(macloggerdx.get("port", "2237"))
 
+        k1alf_omiss_awards = self.cfg["k1alf_omiss_awards"]
+        self.vars["k1alf_omiss_awards_enabled"].set(k1alf_omiss_awards.getboolean("enabled", fallback=False))
+        self.vars["k1alf_omiss_awards_call_sign"].set(k1alf_omiss_awards.get("call_sign", ""))
+        self.vars["k1alf_omiss_awards_password"].set(k1alf_omiss_awards.get("password", ""))
+
     def _save_config(self):
         general = self.cfg["general"]
         general["poll_interval"] = self.vars["poll_interval"].get()
@@ -514,6 +526,11 @@ class App(tk.Tk):
         macloggerdx["port"] = self.vars["macloggerdx_port"].get()
         macloggerdx["my_call"] = my_call
 
+        k1alf_omiss_awards = self.cfg["k1alf_omiss_awards"]
+        k1alf_omiss_awards["enabled"] = "true" if self.vars["k1alf_omiss_awards_enabled"].get() else "false"
+        k1alf_omiss_awards["call_sign"] = self.vars["k1alf_omiss_awards_call_sign"].get()
+        k1alf_omiss_awards["password"] = self.vars["k1alf_omiss_awards_password"].get()
+
         with open(CONFIG_ABS_PATH, "w", encoding="utf-8") as f:
             self.cfg.write(f)
 
@@ -539,6 +556,7 @@ class App(tk.Tk):
                 self.vars["log4om_enabled"].get(),
                 self.vars["dxkeeper_enabled"].get(),
                 self.vars["macloggerdx_enabled"].get(),
+                self.vars["k1alf_omiss_awards_enabled"].get(),
             ]):
                 messagebox.showerror("NetLogger Bridge", "Enable at least one output first.")
                 return

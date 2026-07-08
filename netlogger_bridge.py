@@ -183,6 +183,19 @@ port = 2237
 
 # Your station callsign (sent inside the WSJT-X Log QSO packet)
 my_call =
+
+[k1alf_omiss_awards]
+# Set enabled = true to forward contacts to the K1ALF OMISS Awards Tracker
+# (https://k1alf.com/omiss_awards/). Only contacts logged under NetLogger's
+# OMISS club are sent — everything else is silently skipped, since the site
+# only accepts OMISS net contacts.
+enabled = false
+
+# Your K1ALF OMISS Awards Tracker login (same call sign you use to log in on the site)
+call_sign =
+
+# Your K1ALF OMISS Awards Tracker password
+password =
 """
 
 
@@ -700,17 +713,206 @@ def send_to_dxkeeper(host: str, port: int, adif: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# K1ALF OMISS Awards Tracker (k1alf.com)
+# ---------------------------------------------------------------------------
+#
+# There is no API — the site only accepts a NetLogger-format CSV upload
+# behind a login (https://k1alf.com/omiss_awards/index.php?page=log_import).
+# Both the login and the upload are plain HTML forms whose markup is broken
+# (the login <form> is opened as a direct child of a <tr>, so the browser's
+# HTML5 "form pointer" parsing quirk associates the actual <input> elements
+# with it even though they're DOM siblings, not descendants — verified via
+# `input.form` in a real browser rather than assumed), so both were
+# reverse-engineered by inspecting the live DOM/network traffic rather than
+# any documented API:
+#   Login:  POST process.php  {call_sign, password, login=Submit}
+#   Upload: POST process.php  multipart {MAX_FILE_SIZE=10485760, my_end,
+#           file_upload=<csv>, import=Submit}  (my_end: 0=Base 1=Mobile 2=Portable)
+# A plain requests.Session() carries the login cookie across both calls, kept
+# in the module-level _k1alf_session so login only happens once per bridge
+# run (not once per QSO) and is retried once, transparently, if the session
+# is ever found to have expired.
+#
+# The CSV itself has to match NetLogger's own "export contacts as CSV"
+# format exactly ("ADIF files will not upload correctly", per the site) —
+# there's no way to see that format from the ADIF tailer alone, so the exact
+# column mapping below was reverse-engineered by diffing a real NetLogger
+# CSV export against the matching raw Contacts.adi records for the same
+# QSOs. Two columns don't map straightforwardly from ADIF field names:
+#   - His_RST/My_RST are swapped from what their names suggest: confirmed
+#     against two real records that His_RST is RST_Rcvd and My_RST is
+#     RST_Sent, not the other way around.
+#   - Remarks is synthesized as "#{App_NetLogger_ClubMemberId}#", plus a
+#     trailing " {Comment}" if NetLogger recorded one — not a single ADIF
+#     field.
+# County also needs stripping: NetLogger's Cnty field is "STATE,County"
+# (e.g. "MS,JASPER") but the CSV column wants just "County".
+#
+# Only contacts logged under NetLogger's OMISS club are sent — NetLogger
+# tracks contacts across many unrelated clubs/nets (visible as separate
+# folders under NetLogger's data directory), and the site rejects anything
+# else as "not OMISS related". Forwarding those anyway would just make every
+# non-OMISS QSO retry hourly for retry_give_up_days before failing
+# permanently, for no benefit, so send_to_k1alf_omiss_awards treats a
+# non-OMISS contact as trivially done (returns True without sending) instead.
+
+_K1ALF_BASE_URL = "https://k1alf.com/omiss_awards"
+
+# Persisted across calls so login happens once per bridge run, not once per
+# QSO. Keyed by call_sign so a config change (or GUI restart with a
+# different account) forces a fresh login rather than reusing a stale session.
+_k1alf_session = None
+_k1alf_session_call = None
+
+
+def _k1alf_login(call_sign: str, password: str):
+    session = requests.Session()
+    try:
+        resp = session.post(
+            f"{_K1ALF_BASE_URL}/process.php",
+            data={"call_sign": call_sign, "password": password, "login": "Submit"},
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        log.error(f"K1ALF OMISS Awards login connection error: {e}")
+        return None
+    if "Log Out" not in resp.text:
+        log.error("K1ALF OMISS Awards login failed — check call_sign/password in config.ini")
+        return None
+    return session
+
+
+def _k1alf_county(cnty: str) -> str:
+    """NetLogger's Cnty field is 'STATE,County'; the CSV column wants just 'County'."""
+    return cnty.split(",", 1)[1] if "," in cnty else cnty
+
+
+def _k1alf_csv_field(value: str, quote: bool) -> str:
+    value = value.replace('"', '""')
+    return f'"{value}"' if quote else value
+
+
+def build_k1alf_omiss_csv(adif: str) -> str:
+    """Build a one-record CSV matching NetLogger's own CSV export format (see
+    the K1ALF OMISS Awards Tracker section comment above for how each column
+    was derived). Quoting matches NetLogger's exporter column-for-column,
+    though the site's CSV parser almost certainly doesn't care which fields
+    are quoted as long as the file is valid CSV.
+    """
+    def field(name: str, default: str = "") -> str:
+        v = extract_field(adif, name)
+        return v if v != "?" else default
+
+    qso_date = field("QSO_DATE")
+    time_on  = field("TIME_ON")
+    date_fmt = f"{qso_date[0:4]}/{qso_date[4:6]}/{qso_date[6:8]}" if len(qso_date) == 8 else qso_date
+    time_fmt = f"{time_on[0:2]}:{time_on[2:4]}:{time_on[4:6]}" if len(time_on) == 6 else time_on
+
+    member_id = field("APP_NETLOGGER_CLUBMEMBERID")
+    comment   = field("COMMENT")
+    remarks   = f"#{member_id}#" + (f" {comment}" if comment else "") if member_id else comment
+
+    columns = [
+        (date_fmt,                      False),
+        (time_fmt,                      False),
+        (field("CALL"),                 False),
+        (field("FREQ"),                 False),
+        (field("MODE"),                 False),
+        (field("BAND"),                 False),
+        (field("DXCC"),                 False),
+        (field("RST_RCVD"),             False),
+        (field("RST_SENT"),             False),
+        (field("NAME"),                 True),
+        (field("QTH"),                  True),
+        (field("STATE"),                False),
+        (_k1alf_county(field("CNTY")),  True),
+        (field("GRIDSQUARE"),           False),
+        (field("QSL_SENT", "N"),        False),
+        (field("QSL_RCVD", "N"),        False),
+        (remarks,                       True),
+        (field("ADDRESS"),              True),
+        (field("APP_NETLOGGER_NET"),    True),
+        (field("OPERATOR"),             False),
+        (field("QSL_VIA"),              True),
+        ("",                            False),
+    ]
+
+    header = ("Date,Time,Callsign,Frequency,Mode,Band,DXCC,His_RST,My_RST,Name,City,"
+              "State,County,Grid,QSL_S,QSL_R,Remarks,Address,Net Name,Operator,"
+              "QSL Info, QSL Message")
+    row = ",".join(_k1alf_csv_field(v, q) for v, q in columns)
+    return f"{header}\r\n{row}\r\n"
+
+
+def send_to_k1alf_omiss_awards(cfg: configparser.SectionProxy, adif: str) -> bool:
+    global _k1alf_session, _k1alf_session_call
+
+    club = extract_field(adif, "APP_NETLOGGER_CLUB")
+    if club != "?" and club.upper() != "OMISS":
+        return True
+
+    call_sign = cfg.get("call_sign", "")
+    password  = cfg.get("password", "")
+
+    if _k1alf_session is None or _k1alf_session_call != call_sign:
+        _k1alf_session = _k1alf_login(call_sign, password)
+        _k1alf_session_call = call_sign if _k1alf_session else None
+        if _k1alf_session is None:
+            return False
+
+    mp_status = extract_field(adif, "APP_NETLOGGER_MP_STATUS")
+    my_end = {"M": "1", "P": "2"}.get(mp_status, "0")
+    csv_text = build_k1alf_omiss_csv(adif)
+
+    def _upload():
+        try:
+            return _k1alf_session.post(
+                f"{_K1ALF_BASE_URL}/process.php",
+                data={"MAX_FILE_SIZE": "10485760", "my_end": my_end, "import": "Submit"},
+                files={"file_upload": ("netlogger.csv", csv_text, "text/csv")},
+                timeout=15,
+            )
+        except requests.RequestException as e:
+            log.error(f"K1ALF OMISS Awards connection error: {e}")
+            return None
+
+    resp = _upload()
+
+    # A session that's expired server-side gets bounced back to the login
+    # form instead of the call log; log in again and retry once.
+    if resp is not None and "Log Out" not in resp.text:
+        _k1alf_session = _k1alf_login(call_sign, password)
+        _k1alf_session_call = call_sign if _k1alf_session else None
+        if _k1alf_session is None:
+            return False
+        resp = _upload()
+
+    if resp is None:
+        return False
+    if resp.status_code != 200:
+        log.error(f"K1ALF OMISS Awards HTTP {resp.status_code}")
+        return False
+
+    match = re.search(r"(\d+) records were new.*?(\d+) records were duplicates", resp.text, re.DOTALL)
+    if match and (int(match.group(1)) + int(match.group(2))) > 0:
+        return True
+    log.error(f"K1ALF OMISS Awards import did not confirm success: {resp.text[:300]}")
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Output dispatch (used for both first attempts and per-service retries)
 # ---------------------------------------------------------------------------
 
 SERVICE_LABELS = {
-    "wavelog":     "WaveLog",
-    "n3fjp":       "N3FJP",
-    "n1mm":        "N1MM",
-    "hrd":         "HRD",
-    "log4om":      "Log4OM",
-    "dxkeeper":    "DXKeeper",
-    "macloggerdx": "MacLoggerDX",
+    "wavelog":             "WaveLog",
+    "n3fjp":               "N3FJP",
+    "n1mm":                "N1MM",
+    "hrd":                 "HRD",
+    "log4om":              "Log4OM",
+    "dxkeeper":            "DXKeeper",
+    "macloggerdx":         "MacLoggerDX",
+    "k1alf_omiss_awards":  "K1ALF OMISS Awards",
 }
 
 
@@ -731,6 +933,7 @@ def send_to_services(cfg: configparser.ConfigParser, adif: str, enabled: dict, o
         "dxkeeper": lambda: send_to_dxkeeper(cfg["dxkeeper"].get("host", "127.0.0.1"),
                                               cfg["dxkeeper"].getint("port", fallback=52001), adif),
         "macloggerdx": lambda: send_to_macloggerdx(cfg["macloggerdx"], adif),
+        "k1alf_omiss_awards": lambda: send_to_k1alf_omiss_awards(cfg["k1alf_omiss_awards"], adif),
     }
     results = {}
     for name, sender in senders.items():
@@ -889,6 +1092,7 @@ def run(config_path: str = "config.ini", stop_event=None):
         "log4om":      cfg.getboolean("log4om",      "enabled", fallback=False),
         "dxkeeper":    cfg.getboolean("dxkeeper",    "enabled", fallback=False),
         "macloggerdx": cfg.getboolean("macloggerdx", "enabled", fallback=False),
+        "k1alf_omiss_awards": cfg.getboolean("k1alf_omiss_awards", "enabled", fallback=False),
     }
 
     if not any(enabled.values()):
