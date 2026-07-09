@@ -733,6 +733,23 @@ def send_to_dxkeeper(host: str, port: int, adif: str) -> bool:
 # run (not once per QSO) and is retried once, transparently, if the session
 # is ever found to have expired.
 #
+# `my_end` is the *uploader's own* station status for the whole import — the
+# log_import page literally labels it "Mark my station as a ... station for
+# the records being imported" — always sent as Base (0). An earlier version
+# fed it from NetLogger's APP_NETLOGGER_MP_STATUS field, on the assumption
+# that field meant "my" status; it doesn't. NetLogger has no per-QSO field at
+# all for the *account holder's* own operating mode (there'd be no reason for
+# it to, since NetLogger logs the *other* station checking into the net) —
+# MP_Status instead records the contacted station's mobile/portable status,
+# confirmed by checking every MP_Status value NetLogger ever recorded for a
+# station operating a portable "combo" callsign, which was consistently "P".
+# Feeding that into my_end told the site the *uploader* was portable whenever
+# the contact was, which is backwards (caught via a live account showing a
+# contact's portable status landing in the "My End" column instead of "Other
+# End"). The site's CSV import has no field for the other station's status at
+# all; "Other End" can only be corrected by hand afterward, per contact, via
+# the dropdown on the Call Log page.
+#
 # The CSV itself has to match NetLogger's own "export contacts as CSV"
 # format exactly ("ADIF files will not upload correctly", per the site) —
 # there's no way to see that format from the ADIF tailer alone, so the exact
@@ -860,15 +877,22 @@ def send_to_k1alf_omiss_awards(cfg: configparser.SectionProxy, adif: str) -> boo
         if _k1alf_session is None:
             return False
 
-    mp_status = extract_field(adif, "APP_NETLOGGER_MP_STATUS")
-    my_end = {"M": "1", "P": "2"}.get(mp_status, "0")
     csv_text = build_k1alf_omiss_csv(adif)
 
     def _upload():
         try:
             return _k1alf_session.post(
                 f"{_K1ALF_BASE_URL}/process.php",
-                data={"MAX_FILE_SIZE": "10485760", "my_end": my_end, "import": "Submit"},
+                # "my_end" is the *uploader's own* station status for this
+                # import (the page literally labels it "Mark my station as a
+                # ... station for the records being imported") — always Base,
+                # since NetLogger has no per-QSO field for the account
+                # holder's own operating mode (only APP_NETLOGGER_MP_STATUS,
+                # which records the *contacted* station's mobile/portable
+                # status). The site has no CSV-import field for the other
+                # station's status at all — "Other End" can only be set by
+                # hand afterward via the Call Log page's per-row dropdown.
+                data={"MAX_FILE_SIZE": "10485760", "my_end": "0", "import": "Submit"},
                 files={"file_upload": ("netlogger.csv", csv_text, "text/csv")},
                 timeout=15,
             )

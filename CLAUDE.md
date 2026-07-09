@@ -193,6 +193,19 @@ polling loop in `run()`:
    (`_k1alf_session`) so login happens once per bridge run rather than once
    per QSO, and is transparently retried once if a session is ever found to
    have expired (detected by the response no longer containing "Log Out").
+   `my_end` is always sent as `0` (Base) — it's the *uploader's own* station
+   status for the whole import (the log_import page labels it "Mark my
+   station as a ... station for the records being imported"), not the
+   contacted station's. An earlier version fed it from NetLogger's
+   `App_NetLogger_MP_Status` field on the assumption that field meant "my"
+   status; it doesn't — NetLogger has no per-QSO field for the account
+   holder's own operating mode at all, since NetLogger logs the *other*
+   station checking into the net, so `MP_Status` instead records the
+   contacted station's mobile/portable status (confirmed by checking every
+   value NetLogger ever recorded for a station operating a portable "combo"
+   callsign, consistently `P`). The site's CSV import has no field for the
+   other station's status at all — "Other End" can only be corrected by hand
+   afterward, per contact, via the dropdown on the Call Log page.
    `build_k1alf_omiss_csv` builds the one-record CSV itself, whose column
    layout was reverse-engineered by diffing a real NetLogger CSV export
    against the matching raw `Contacts.adi` records for the same QSOs (the

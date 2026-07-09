@@ -242,9 +242,12 @@ other club/net is silently skipped, since the site rejects anything else as
 2. Set `call_sign` and `password` in `config.ini` to your login for that site
 3. Set `enabled = true`
 
-Your station type (Base/Mobile/Portable) for each upload is read automatically
-from the same per-QSO setting NetLogger itself records — there's nothing to
-configure for it.
+Every upload marks *your own* station as Base — NetLogger doesn't track your
+own per-QSO operating mode (its "MP Status" field records whether the
+*contacted* station was mobile/portable, not you), and the site's CSV import
+has no way to set the *other* station's status at all. If a contact needs
+"Other End" marked Mobile/Portable, correct it by hand afterward on the
+**Call Log** page — the same place you'd notice it's wrong.
 
 ---
 
