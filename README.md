@@ -294,6 +294,12 @@ A line's entry is only dropped once its contact is no longer found in
 `Contacts.adi` (i.e. you deleted it in NetLogger), keeping the state file in
 sync with what's actually still logged.
 
+Turning on a new output *after* older contacts already finished forwarding to
+the outputs enabled at the time is treated the same as a failure needing
+retry: the newly-enabled output has no entry yet on those older lines, so on
+the next poll (or bridge restart) it gets sent to just that output, same as
+any other pending retry — no need to touch `forwarded_qsos.txt` by hand.
+
 To force a specific contact to be re-sent to *every* enabled output (e.g. you
 fixed it in NetLogger, or want to retry sooner than `retry_interval_minutes`),
 stop the bridge, find and delete its line in `forwarded_qsos.txt`, then start

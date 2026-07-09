@@ -956,11 +956,24 @@ def _parse_iso(ts: str) -> datetime.datetime:
     return datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
 
 
-def _is_done(record: dict) -> bool:
-    """A record needs no more attention once every service it was attempted against succeeded, or retries were abandoned."""
+def _is_done(record: dict, enabled: dict) -> bool:
+    """
+    A record needs no more attention once retries were abandoned, it predates
+    per-service tracking entirely (no service key at all — seeded on first
+    run/--reset-state, or migrated from an older on-disk format; must stay
+    done forever regardless of which services get enabled later, since the
+    whole point of seeding is to never forward those contacts), or every
+    *currently enabled* service succeeded. Checking only the keys already
+    present (rather than every enabled service) would let a record forwarded
+    before a new service was enabled — e.g. WaveLog+N3FJP succeeded weeks
+    before K1ALF was turned on — look permanently "done" and never pick up
+    the new service at all.
+    """
     if record.get("gave_up"):
         return True
-    return all(v for k, v in record.items() if k in SERVICE_LABELS)
+    if not any(k in SERVICE_LABELS for k in record):
+        return True
+    return all(record.get(name) for name, on in enabled.items() if on)
 
 
 def load_state(state_file: str) -> dict:
@@ -982,7 +995,10 @@ def load_state(state_file: str) -> dict:
     offset or a plain pipe-delimited key (pre-retry-tracking) become a
     no-detail record (treated as already complete, since those formats only
     ever recorded a key once it had been attempted), and the brief JSON-dict
-    version's "keys" are extracted the same way.
+    version's "keys" are extracted the same way. Backfilling
+    "first_attempt"/"last_attempt" for records that need retry-tracking but
+    lack it happens in run(), not here, since that decision depends on which
+    services are currently enabled (see _is_done).
     """
     path = Path(state_file)
     if not path.exists():
@@ -1009,16 +1025,6 @@ def load_state(state_file: str) -> dict:
         except (ValueError, KeyError):
             key, obj = line, {}
         records[key] = obj
-
-    # Records written by versions predating retry-tracking can have a
-    # False service result with no "first_attempt"/"last_attempt" — backfill
-    # both to now so run() retries them on its own schedule instead of
-    # crashing on the missing keys.
-    ts = _now_iso()
-    for record in records.values():
-        if not _is_done(record) and "last_attempt" not in record:
-            record.setdefault("first_attempt", ts)
-            record["last_attempt"] = ts
 
     return {"initialized": True, "records": records}
 
@@ -1117,6 +1123,24 @@ def run(config_path: str = "config.ini", stop_event=None):
     else:
         log.info(f"Resuming — tracking {len(records)} previously forwarded contact(s)")
 
+    # A record can be missing a currently-enabled service without ever having
+    # failed anything — e.g. it was forwarded to WaveLog/N3FJP before K1ALF
+    # was turned on. Give it retry-tracking now (rather than at load_state
+    # time, which doesn't know what's enabled) so it's picked up on the very
+    # next poll. last_attempt is backdated past retry_interval rather than
+    # set to "now" so this doesn't force a wait — nothing was actually
+    # attempted yet, so there's no reason to delay the first try.
+    backfill_now = datetime.datetime.now(datetime.timezone.utc)
+    backdated = (backfill_now - retry_interval - datetime.timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    backfilled = False
+    for record in records.values():
+        if not _is_done(record, enabled) and "last_attempt" not in record:
+            record.setdefault("first_attempt", _now_iso())
+            record["last_attempt"] = backdated
+            backfilled = True
+    if backfilled:
+        save_state(state_file, records)
+
     try:
         PID_FILE.write_text(str(os.getpid()))
 
@@ -1130,7 +1154,7 @@ def run(config_path: str = "config.ini", stop_event=None):
                 current_keys.add(key)
 
                 record = records.get(key)
-                if record is not None and _is_done(record):
+                if record is not None and _is_done(record, enabled):
                     continue
 
                 callsign = extract_field(adif, "Call")
@@ -1153,15 +1177,18 @@ def run(config_path: str = "config.ini", stop_event=None):
                 if now - _parse_iso(record["last_attempt"]) < retry_interval:
                     continue
 
-                failed = {name for name in SERVICE_LABELS if record.get(name) is False}
+                # Missing (never attempted, e.g. a service enabled after this
+                # contact was already forwarded) counts the same as an
+                # explicit False — both need a send.
+                failed = {name for name in SERVICE_LABELS if enabled.get(name) and not record.get(name)}
                 log.info(f"Retrying contact: {callsign} {band} {mode} (pending: {', '.join(sorted(failed))})")
                 record.update(send_to_services(cfg, adif, enabled, only=failed))
 
-                if all(record.get(name, True) for name in SERVICE_LABELS):
+                if all(record.get(name) for name, on in enabled.items() if on):
                     record.pop("first_attempt", None)
                     record.pop("last_attempt", None)
                 elif now - _parse_iso(record["first_attempt"]) >= retry_give_up:
-                    still = sorted(name for name in SERVICE_LABELS if record.get(name) is False)
+                    still = sorted(name for name in SERVICE_LABELS if enabled.get(name) and not record.get(name))
                     log.warning(f"Giving up on {callsign} {band} {mode} after {retry_give_up.days} day(s) — never reached: {', '.join(still)}")
                     record["gave_up"] = True
                 else:

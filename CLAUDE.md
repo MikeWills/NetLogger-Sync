@@ -228,21 +228,36 @@ polling loop in `run()`:
    failed service still being retried — see the main loop below. Deleting a
    contact's line by hand and restarting the bridge forces a full re-send to
    every enabled service; this is the supported way to re-log a fixed-up QSO
-   or retry sooner than `retry_interval_minutes`. `_is_done(record)` is `True` once
-   every service it was attempted against succeeded, or `"gave_up"` is set —
-   used to decide whether a contact needs any further attention at all.
+   or retry sooner than `retry_interval_minutes`. `_is_done(record, enabled)`
+   is `True` once `"gave_up"` is set, or the record has no service key at all
+   (a no-detail record — see below), or *every currently enabled* service
+   succeeded. It deliberately checks against `enabled` rather than just the
+   keys already present in the record: checking only present keys would let
+   a contact forwarded to WaveLog/N3FJP look permanently "done" even after
+   K1ALF gets enabled afterwards, since the record predates K1ALF entirely
+   and would never gain that key otherwise — this was a real bug (a service
+   enabled after some contacts had already finished forwarding to the
+   services active at the time never got attempted for those contacts).
    `load_state` treats a missing file as `initialized: False` and migrates
    older on-disk formats transparently, all to a no-detail (already-complete)
-   record `{}` — since `_is_done({})` is `True` (no service key has a falsy
-   value), this safely treats anything pre-dating per-service tracking as
-   already finished rather than retrying it: a plain byte offset or a bare
-   `QSO_DATE|TIME_ON|CALL|BAND` line (the original dedup-key-only format) has
-   no `"key"`-bearing JSON to extract, and a short-lived JSON-dict version
-   (`{"initialized": ..., "keys": {key: qso_date}}`) has its `"keys"` mapped to
-   `{}` directly. A record from a version predating retry-tracking can also
-   have a `False` service result with no `first_attempt`/`last_attempt` at
-   all; `load_state` backfills both to the current time for any such
-   not-done record rather than letting `run()` crash on the missing keys.
+   record `{}` — a plain byte offset or a bare `QSO_DATE|TIME_ON|CALL|BAND`
+   line (the original dedup-key-only format) has no `"key"`-bearing JSON to
+   extract, and a short-lived JSON-dict version (`{"initialized": ...,
+   "keys": {key: qso_date}}`) has its `"keys"` mapped to `{}` directly. Unlike
+   a record that's missing just *some* enabled services' keys (still not
+   done, per above), a no-detail record has no service keys whatsoever, which
+   `_is_done` takes to mean it predates per-service tracking and must stay
+   done forever regardless of which services get enabled later — this is
+   what makes first-run seeding and `--reset-state` actually stick. A record
+   from a version predating retry-tracking can also have a `False` service
+   result with no `first_attempt`/`last_attempt` at all; since deciding
+   whether a record needs backfilling now depends on `enabled` (via
+   `_is_done`), which `load_state` doesn't have, this backfill happens in
+   `run()` right after `enabled` is computed, rather than in `load_state`.
+   `last_attempt` is deliberately backdated past `retry_interval` (rather than
+   set to "now") so a record only missing a newly-enabled service's key gets
+   picked up on the very next poll instead of waiting out a full
+   `retry_interval` for a "first" attempt that never actually happened.
    `--reset-state` (handled in the entry point, not via `run()`)
    calls `reset_state()`, which uses `_seed_keys_from_existing()` to mark every
    contact currently in the file as forwarded *without sending any of them*, so
@@ -259,13 +274,17 @@ polling loop in `run()`:
    forwarded; on subsequent runs resumes with the persisted records. Each poll
    cycle: re-read every complete record in the file, track the dedup key of
    every record seen this cycle (`current_keys`), and for each:
-   - no existing record, or `_is_done()` — handled as before (skip, or send to
-     every enabled service via `send_to_services()` and store the per-service
-     results, with `first_attempt`/`last_attempt` added only if something failed).
+   - no existing record, or `_is_done(record, enabled)` — handled as before
+     (skip, or send to every enabled service via `send_to_services()` and
+     store the per-service results, with `first_attempt`/`last_attempt` added
+     only if something failed).
    - an existing, not-done record — skipped unless `retry_interval_minutes`
      (`[general]` in `config.ini`, default 60) has elapsed since `last_attempt`,
-     then retried via `send_to_services(..., only={failed service names})`. If
-     everything now succeeds, the timestamps are dropped; if
+     then retried via `send_to_services(..., only={failed service names})`,
+     where "failed" means any enabled service the record doesn't already have
+     a `True` result for — an explicit `False` and a missing key (never
+     attempted) are treated the same. If everything now succeeds, the
+     timestamps are dropped; if
      `retry_give_up_days` (default 5) has elapsed since `first_attempt`, a
      warning is logged and `"gave_up": true` is set instead of retrying
      further; otherwise `last_attempt` is bumped and it's retried again next
