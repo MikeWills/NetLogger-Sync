@@ -242,9 +242,12 @@ other club/net is silently skipped, since the site rejects anything else as
 2. Set `call_sign` and `password` in `config.ini` to your login for that site
 3. Set `enabled = true`
 
-Your station type (Base/Mobile/Portable) for each upload is read automatically
-from the same per-QSO setting NetLogger itself records — there's nothing to
-configure for it.
+Every upload marks *your own* station as Base — NetLogger doesn't track your
+own per-QSO operating mode (its "MP Status" field records whether the
+*contacted* station was mobile/portable, not you), and the site's CSV import
+has no way to set the *other* station's status at all. If a contact needs
+"Other End" marked Mobile/Portable, correct it by hand afterward on the
+**Call Log** page — the same place you'd notice it's wrong.
 
 ---
 
@@ -293,6 +296,12 @@ made it out.
 A line's entry is only dropped once its contact is no longer found in
 `Contacts.adi` (i.e. you deleted it in NetLogger), keeping the state file in
 sync with what's actually still logged.
+
+Turning on a new output *after* older contacts already finished forwarding to
+the outputs enabled at the time is treated the same as a failure needing
+retry: the newly-enabled output has no entry yet on those older lines, so on
+the next poll (or bridge restart) it gets sent to just that output, same as
+any other pending retry — no need to touch `forwarded_qsos.txt` by hand.
 
 To force a specific contact to be re-sent to *every* enabled output (e.g. you
 fixed it in NetLogger, or want to retry sooner than `retry_interval_minutes`),

@@ -733,6 +733,23 @@ def send_to_dxkeeper(host: str, port: int, adif: str) -> bool:
 # run (not once per QSO) and is retried once, transparently, if the session
 # is ever found to have expired.
 #
+# `my_end` is the *uploader's own* station status for the whole import — the
+# log_import page literally labels it "Mark my station as a ... station for
+# the records being imported" — always sent as Base (0). An earlier version
+# fed it from NetLogger's APP_NETLOGGER_MP_STATUS field, on the assumption
+# that field meant "my" status; it doesn't. NetLogger has no per-QSO field at
+# all for the *account holder's* own operating mode (there'd be no reason for
+# it to, since NetLogger logs the *other* station checking into the net) —
+# MP_Status instead records the contacted station's mobile/portable status,
+# confirmed by checking every MP_Status value NetLogger ever recorded for a
+# station operating a portable "combo" callsign, which was consistently "P".
+# Feeding that into my_end told the site the *uploader* was portable whenever
+# the contact was, which is backwards (caught via a live account showing a
+# contact's portable status landing in the "My End" column instead of "Other
+# End"). The site's CSV import has no field for the other station's status at
+# all; "Other End" can only be corrected by hand afterward, per contact, via
+# the dropdown on the Call Log page.
+#
 # The CSV itself has to match NetLogger's own "export contacts as CSV"
 # format exactly ("ADIF files will not upload correctly", per the site) —
 # there's no way to see that format from the ADIF tailer alone, so the exact
@@ -860,15 +877,22 @@ def send_to_k1alf_omiss_awards(cfg: configparser.SectionProxy, adif: str) -> boo
         if _k1alf_session is None:
             return False
 
-    mp_status = extract_field(adif, "APP_NETLOGGER_MP_STATUS")
-    my_end = {"M": "1", "P": "2"}.get(mp_status, "0")
     csv_text = build_k1alf_omiss_csv(adif)
 
     def _upload():
         try:
             return _k1alf_session.post(
                 f"{_K1ALF_BASE_URL}/process.php",
-                data={"MAX_FILE_SIZE": "10485760", "my_end": my_end, "import": "Submit"},
+                # "my_end" is the *uploader's own* station status for this
+                # import (the page literally labels it "Mark my station as a
+                # ... station for the records being imported") — always Base,
+                # since NetLogger has no per-QSO field for the account
+                # holder's own operating mode (only APP_NETLOGGER_MP_STATUS,
+                # which records the *contacted* station's mobile/portable
+                # status). The site has no CSV-import field for the other
+                # station's status at all — "Other End" can only be set by
+                # hand afterward via the Call Log page's per-row dropdown.
+                data={"MAX_FILE_SIZE": "10485760", "my_end": "0", "import": "Submit"},
                 files={"file_upload": ("netlogger.csv", csv_text, "text/csv")},
                 timeout=15,
             )
@@ -956,11 +980,24 @@ def _parse_iso(ts: str) -> datetime.datetime:
     return datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
 
 
-def _is_done(record: dict) -> bool:
-    """A record needs no more attention once every service it was attempted against succeeded, or retries were abandoned."""
+def _is_done(record: dict, enabled: dict) -> bool:
+    """
+    A record needs no more attention once retries were abandoned, it predates
+    per-service tracking entirely (no service key at all — seeded on first
+    run/--reset-state, or migrated from an older on-disk format; must stay
+    done forever regardless of which services get enabled later, since the
+    whole point of seeding is to never forward those contacts), or every
+    *currently enabled* service succeeded. Checking only the keys already
+    present (rather than every enabled service) would let a record forwarded
+    before a new service was enabled — e.g. WaveLog+N3FJP succeeded weeks
+    before K1ALF was turned on — look permanently "done" and never pick up
+    the new service at all.
+    """
     if record.get("gave_up"):
         return True
-    return all(v for k, v in record.items() if k in SERVICE_LABELS)
+    if not any(k in SERVICE_LABELS for k in record):
+        return True
+    return all(record.get(name) for name, on in enabled.items() if on)
 
 
 def load_state(state_file: str) -> dict:
@@ -982,7 +1019,10 @@ def load_state(state_file: str) -> dict:
     offset or a plain pipe-delimited key (pre-retry-tracking) become a
     no-detail record (treated as already complete, since those formats only
     ever recorded a key once it had been attempted), and the brief JSON-dict
-    version's "keys" are extracted the same way.
+    version's "keys" are extracted the same way. Backfilling
+    "first_attempt"/"last_attempt" for records that need retry-tracking but
+    lack it happens in run(), not here, since that decision depends on which
+    services are currently enabled (see _is_done).
     """
     path = Path(state_file)
     if not path.exists():
@@ -1009,16 +1049,6 @@ def load_state(state_file: str) -> dict:
         except (ValueError, KeyError):
             key, obj = line, {}
         records[key] = obj
-
-    # Records written by versions predating retry-tracking can have a
-    # False service result with no "first_attempt"/"last_attempt" — backfill
-    # both to now so run() retries them on its own schedule instead of
-    # crashing on the missing keys.
-    ts = _now_iso()
-    for record in records.values():
-        if not _is_done(record) and "last_attempt" not in record:
-            record.setdefault("first_attempt", ts)
-            record["last_attempt"] = ts
 
     return {"initialized": True, "records": records}
 
@@ -1117,6 +1147,24 @@ def run(config_path: str = "config.ini", stop_event=None):
     else:
         log.info(f"Resuming — tracking {len(records)} previously forwarded contact(s)")
 
+    # A record can be missing a currently-enabled service without ever having
+    # failed anything — e.g. it was forwarded to WaveLog/N3FJP before K1ALF
+    # was turned on. Give it retry-tracking now (rather than at load_state
+    # time, which doesn't know what's enabled) so it's picked up on the very
+    # next poll. last_attempt is backdated past retry_interval rather than
+    # set to "now" so this doesn't force a wait — nothing was actually
+    # attempted yet, so there's no reason to delay the first try.
+    backfill_now = datetime.datetime.now(datetime.timezone.utc)
+    backdated = (backfill_now - retry_interval - datetime.timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    backfilled = False
+    for record in records.values():
+        if not _is_done(record, enabled) and "last_attempt" not in record:
+            record.setdefault("first_attempt", _now_iso())
+            record["last_attempt"] = backdated
+            backfilled = True
+    if backfilled:
+        save_state(state_file, records)
+
     try:
         PID_FILE.write_text(str(os.getpid()))
 
@@ -1130,7 +1178,7 @@ def run(config_path: str = "config.ini", stop_event=None):
                 current_keys.add(key)
 
                 record = records.get(key)
-                if record is not None and _is_done(record):
+                if record is not None and _is_done(record, enabled):
                     continue
 
                 callsign = extract_field(adif, "Call")
@@ -1153,15 +1201,18 @@ def run(config_path: str = "config.ini", stop_event=None):
                 if now - _parse_iso(record["last_attempt"]) < retry_interval:
                     continue
 
-                failed = {name for name in SERVICE_LABELS if record.get(name) is False}
+                # Missing (never attempted, e.g. a service enabled after this
+                # contact was already forwarded) counts the same as an
+                # explicit False — both need a send.
+                failed = {name for name in SERVICE_LABELS if enabled.get(name) and not record.get(name)}
                 log.info(f"Retrying contact: {callsign} {band} {mode} (pending: {', '.join(sorted(failed))})")
                 record.update(send_to_services(cfg, adif, enabled, only=failed))
 
-                if all(record.get(name, True) for name in SERVICE_LABELS):
+                if all(record.get(name) for name, on in enabled.items() if on):
                     record.pop("first_attempt", None)
                     record.pop("last_attempt", None)
                 elif now - _parse_iso(record["first_attempt"]) >= retry_give_up:
-                    still = sorted(name for name in SERVICE_LABELS if record.get(name) is False)
+                    still = sorted(name for name in SERVICE_LABELS if enabled.get(name) and not record.get(name))
                     log.warning(f"Giving up on {callsign} {band} {mode} after {retry_give_up.days} day(s) — never reached: {', '.join(still)}")
                     record["gave_up"] = True
                 else:
