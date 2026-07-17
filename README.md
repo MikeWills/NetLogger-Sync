@@ -9,7 +9,7 @@ Reads NetLogger's `Contacts.adi` file and forwards new QSOs in near real-time to
 - **DXLab Suite DXKeeper**
 - **MacLoggerDX** (Mac-only; untested, see setup section below)
 - **K1ALF OMISS Awards Tracker** (k1alf.com; only forwards contacts logged under NetLogger's OMISS club)
-- **QRZ Logbook** (requires a QRZ subscription, XML level or higher)
+- **QRZ Logbook** (requires a QRZ subscription, XML level or higher; untested, see setup section below)
 
 Any combination of outputs can be enabled independently.
 
@@ -255,6 +255,11 @@ has no way to set the *other* station's status at all. If a contact needs
 **Call Log** page — the same place you'd notice it's wrong.
 
 ### 11. QRZ Logbook setup
+
+> **Untested:** built from QRZ's published API docs only — no QRZ Logbook
+> subscription/API key was available to test against a real account. Treat
+> it the same way as MacLoggerDX until it's been verified against a live
+> upload.
 
 Requires an active QRZ subscription at the XML level or higher — the
 Logbook API is a subscriber-only feature.

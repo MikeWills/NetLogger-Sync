@@ -229,7 +229,11 @@ polling loop in `run()`:
    `send_to_qrz` POSTs `ACTION=INSERT` and the raw ADIF record to
    `https://logbook.qrz.com/api` — a subscriber-only feature (XML
    subscription level or higher) gated on a per-user Logbook API key
-   (distinct from QRZ's XML/callsign-lookup key). Unlike WaveLog's JSON
+   (distinct from QRZ's XML/callsign-lookup key). **Unverified** — built
+   from QRZ's own published API docs, since no QRZ Logbook
+   subscription/API key was available to test against a real account;
+   treat it as the next output most likely to need a fix once actually
+   tested, the way N1MM and HRD did. Unlike WaveLog's JSON
    response, QRZ's response is `name=value` pairs (parsed with
    `urllib.parse.parse_qsl`): `RESULT=OK` on success, `RESULT=REPLACE` if
    the QSO duplicated an existing record *and* `OPTION=REPLACE` was sent,
