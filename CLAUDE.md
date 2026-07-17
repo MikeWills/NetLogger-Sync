@@ -20,6 +20,7 @@ ADIF log file for newly appended QSO records and forwards each one to:
 - **DXLab Suite DXKeeper** via TCP `externallog` command on port 52001
 - **MacLoggerDX** via the same WSJT-X binary UDP packets as N1MM, on port 2237 (Mac-only; unverified — no Mac was available to test against real software)
 - **K1ALF OMISS Awards Tracker** (k1alf.com) via a reverse-engineered login + CSV upload (there is no API); only contacts logged under NetLogger's OMISS club are sent
+- **QRZ Logbook** via HTTP REST API (`POST https://logbook.qrz.com/api`, `ACTION=INSERT`); requires a QRZ subscription (XML level or higher)
 
 Any combination of outputs can be enabled independently via `config.ini`.
 
@@ -229,11 +230,8 @@ polling loop in `run()`:
    `send_to_qrz` POSTs `ACTION=INSERT` and the raw ADIF record to
    `https://logbook.qrz.com/api` — a subscriber-only feature (XML
    subscription level or higher) gated on a per-user Logbook API key
-   (distinct from QRZ's XML/callsign-lookup key). **Unverified** — built
-   from QRZ's own published API docs, since no QRZ Logbook
-   subscription/API key was available to test against a real account;
-   treat it as the next output most likely to need a fix once actually
-   tested, the way N1MM and HRD did. Unlike WaveLog's JSON
+   (distinct from QRZ's XML/callsign-lookup key). Verified working against
+   a real QRZ Logbook upload. Unlike WaveLog's JSON
    response, QRZ's response is `name=value` pairs (parsed with
    `urllib.parse.parse_qsl`): `RESULT=OK` on success, `RESULT=REPLACE` if
    the QSO duplicated an existing record *and* `OPTION=REPLACE` was sent,
