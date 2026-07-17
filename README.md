@@ -12,6 +12,11 @@ Reads NetLogger's `Contacts.adi` file and forwards new QSOs in near real-time to
 
 Any combination of outputs can be enabled independently.
 
+For contacts logged under NetLogger's **OMISS** club, the bridge prepends
+your OMISS member number to the comment sent to every enabled output (e.g.
+`#000000#` plus any existing comment text) — the same format NetLogger's own
+CSV export already uses. This happens automatically and isn't configurable.
+
 ---
 
 ## Easy install (no Python required)

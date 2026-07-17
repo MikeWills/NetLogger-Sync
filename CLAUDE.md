@@ -107,7 +107,8 @@ polling loop in `run()`:
 2. **ADI file location** (`find_adi_file`, `ADI_PATHS`) — locates NetLogger's
    `Contacts.adi`, auto-detecting an OS-specific default path if `contacts_adi` is blank.
 3. **ADIF file tailer** (`read_all_records`, `normalize_adif`, `extract_field`,
-   `record_dedup_key`) — `read_all_records` reads the *entire* `Contacts.adi` file
+   `apply_omiss_comment_tag`, `record_dedup_key`) — `read_all_records` reads the
+   *entire* `Contacts.adi` file
    on every poll and splits on `<eor>` (case-insensitive) to find complete
    records, leaving any trailing incomplete record unconsumed for the next poll.
    `normalize_adif` re-parses each `<TAG:LENGTH>value` field using its declared
@@ -118,7 +119,18 @@ polling loop in `run()`:
    does a simple regex pull of a field value (used for log messages and by
    `record_dedup_key`, which builds a `QSO_DATE|TIME_ON|CALL|BAND` identity used
    to decide whether a record has already been forwarded — see state persistence
-   below).
+   below). `apply_omiss_comment_tag` runs on every record right after
+   `normalize_adif`, before it reaches any sender: for contacts logged under
+   NetLogger's OMISS club (`App_NetLogger_Club` = `OMISS`) with a
+   `App_NetLogger_ClubMemberId`, it rewrites (or inserts) the `COMMENT` field
+   to `#{member_id}#` plus the existing comment text, if any — matching the
+   format NetLogger's own CSV export already uses. Doing this once, upstream
+   of every sender, means the full-ADIF senders (WaveLog, N3FJP, Log4OM,
+   DXKeeper) and the field-by-field senders (N1MM, HRD, MacLoggerDX, K1ALF
+   OMISS Awards) all see the same tagged `COMMENT` via their normal field
+   extraction, with no per-output special-casing; `build_k1alf_omiss_csv`'s
+   `Remarks` column in particular used to synthesize this same `#id#` prefix
+   itself and now just reads the already-tagged `COMMENT` field (see below).
 4. **Output senders** (`send_to_wavelog`, `send_to_n3fjp`, `send_to_n1mm`,
    `send_to_hrd`, `send_to_log4om`, `send_to_dxkeeper`, `send_to_macloggerdx`,
    `send_to_k1alf_omiss_awards`) —
@@ -213,9 +225,8 @@ polling loop in `run()`:
    two columns don't map straightforwardly from ADIF field names: `His_RST`/
    `My_RST` are swapped from what their names suggest (confirmed against two
    real records that `His_RST` is `RST_Rcvd` and `My_RST` is `RST_Sent`), and
-   `Remarks` is synthesized as `#{App_NetLogger_ClubMemberId}#` plus a
-   trailing ` {Comment}` if NetLogger recorded one, rather than being a
-   single ADIF field. Only contacts logged under NetLogger's OMISS club
+   `Remarks` is just the ADIF record's (already `apply_omiss_comment_tag`-tagged)
+   `COMMENT` field, rather than a column with its own mapping. Only contacts logged under NetLogger's OMISS club
    (`App_NetLogger_Club` = `OMISS`) are actually sent — NetLogger tracks
    contacts across many unrelated clubs/nets (separate folders under its
    data directory), and the site rejects anything else as "not OMISS
