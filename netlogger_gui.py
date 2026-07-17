@@ -383,6 +383,11 @@ class App(tk.Tk):
         self._add_entry(k1alf_omiss_awards, "k1alf_omiss_awards_call_sign", "Call sign")
         self._add_entry(k1alf_omiss_awards, "k1alf_omiss_awards_password", "Password", secret=True)
 
+        qrz = ttk.Frame(notebook)
+        notebook.add(qrz, text="QRZ Logbook")
+        self._add_checkbox(qrz, "qrz_enabled", "Enable QRZ Logbook")
+        self._add_entry(qrz, "qrz_api_key", "API key", secret=True)
+
         buttons = ttk.Frame(self)
         buttons.pack(fill="x", padx=10, pady=5)
         ttk.Button(buttons, text="Save Config", command=self._save_config).pack(side="left")
@@ -477,6 +482,10 @@ class App(tk.Tk):
         self.vars["k1alf_omiss_awards_call_sign"].set(k1alf_omiss_awards.get("call_sign", ""))
         self.vars["k1alf_omiss_awards_password"].set(k1alf_omiss_awards.get("password", ""))
 
+        qrz = self.cfg["qrz"]
+        self.vars["qrz_enabled"].set(qrz.getboolean("enabled", fallback=False))
+        self.vars["qrz_api_key"].set(qrz.get("api_key", ""))
+
     def _save_config(self):
         general = self.cfg["general"]
         general["poll_interval"] = self.vars["poll_interval"].get()
@@ -531,6 +540,10 @@ class App(tk.Tk):
         k1alf_omiss_awards["call_sign"] = self.vars["k1alf_omiss_awards_call_sign"].get()
         k1alf_omiss_awards["password"] = self.vars["k1alf_omiss_awards_password"].get()
 
+        qrz = self.cfg["qrz"]
+        qrz["enabled"] = "true" if self.vars["qrz_enabled"].get() else "false"
+        qrz["api_key"] = self.vars["qrz_api_key"].get()
+
         with open(CONFIG_ABS_PATH, "w", encoding="utf-8") as f:
             self.cfg.write(f)
 
@@ -557,6 +570,7 @@ class App(tk.Tk):
                 self.vars["dxkeeper_enabled"].get(),
                 self.vars["macloggerdx_enabled"].get(),
                 self.vars["k1alf_omiss_awards_enabled"].get(),
+                self.vars["qrz_enabled"].get(),
             ]):
                 messagebox.showerror("NetLogger Bridge", "Enable at least one output first.")
                 return

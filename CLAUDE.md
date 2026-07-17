@@ -103,7 +103,7 @@ polling loop in `run()`:
 
 1. **Config** (`load_config`, `create_sample_config`) — `configparser`-based, sections
    `[general]`, `[wavelog]`, `[n3fjp]`, `[n1mm]`, `[hrd]`, `[log4om]`, `[dxkeeper]`,
-   `[macloggerdx]`, `[k1alf_omiss_awards]`.
+   `[macloggerdx]`, `[k1alf_omiss_awards]`, `[qrz]`.
 2. **ADI file location** (`find_adi_file`, `ADI_PATHS`) — locates NetLogger's
    `Contacts.adi`, auto-detecting an OS-specific default path if `contacts_adi` is blank.
 3. **ADIF file tailer** (`read_all_records`, `normalize_adif`, `extract_field`,
@@ -121,13 +121,13 @@ polling loop in `run()`:
    below).
 4. **Output senders** (`send_to_wavelog`, `send_to_n3fjp`, `send_to_n1mm`,
    `send_to_hrd`, `send_to_log4om`, `send_to_dxkeeper`, `send_to_macloggerdx`,
-   `send_to_k1alf_omiss_awards`) —
+   `send_to_k1alf_omiss_awards`, `send_to_qrz`) —
    each takes a built ADIF record string and pushes it to one destination,
    returning a bool success flag. `send_to_services` (in the "Output
-   dispatch" section) wraps all eight behind a single `{service_name:
+   dispatch" section) wraps all nine behind a single `{service_name:
    sender_fn}` table, keyed by the same short names used throughout state
    persistence (`wavelog`, `n3fjp`, `n1mm`, `hrd`, `log4om`, `dxkeeper`,
-   `macloggerdx`, `k1alf_omiss_awards`) and `SERVICE_LABELS` (their display names for logging, e.g.
+   `macloggerdx`, `k1alf_omiss_awards`, `qrz`) and `SERVICE_LABELS` (their display names for logging, e.g.
    `"n3fjp" -> "N3FJP"`). It takes an `only` set so the same function serves both
    a first attempt (every enabled service) and a retry (just the services that
    previously failed for that contact) — see state persistence below.
@@ -226,6 +226,20 @@ polling loop in `run()`:
    counts as success, since it means the contact is already tracked
    server-side) rather than matching on the "File uploaded sucessfully."
    text, since that string's typo is presumably not something to depend on.
+   `send_to_qrz` POSTs `ACTION=INSERT` and the raw ADIF record to
+   `https://logbook.qrz.com/api` — a subscriber-only feature (XML
+   subscription level or higher) gated on a per-user Logbook API key
+   (distinct from QRZ's XML/callsign-lookup key). Unlike WaveLog's JSON
+   response, QRZ's response is `name=value` pairs (parsed with
+   `urllib.parse.parse_qsl`): `RESULT=OK` on success, `RESULT=REPLACE` if
+   the QSO duplicated an existing record *and* `OPTION=REPLACE` was sent,
+   or `RESULT=FAIL&REASON=...` otherwise. `OPTION=REPLACE` is deliberately
+   never sent — QRZ's own docs warn it "WILL overwrite confirmed QSOs with
+   the supplied unconfirmed QSO", so a plain `INSERT` that just fails on a
+   duplicate is the safer default: a duplicate is reported as a failure
+   (retried, then eventually `gave_up`) rather than silently accepted, the
+   same tradeoff `send_to_wavelog` makes for its own 400 `status: abort`
+   duplicate response.
 5. **State persistence** (`load_state`, `save_state`, `prune_records`,
    `_seed_keys_from_existing`, `reset_state`, `_is_done`) — tracks per-contact,
    per-service forwarding status by `record_dedup_key`, not file position,
