@@ -309,6 +309,36 @@ def extract_field(adif: str, field: str) -> str:
     return match.group(1).strip() if match else "?"
 
 
+def apply_omiss_comment_tag(adif: str) -> str:
+    """
+    For contacts logged under NetLogger's OMISS club, prepend the station's
+    OMISS member number to COMMENT as "#000000#" (plus the existing comment
+    text, if any) — the same format NetLogger's own CSV export already uses.
+
+    Applied once here, right after normalize_adif, so every output sees the
+    same tagged COMMENT: the full-ADIF senders (WaveLog, N3FJP, Log4OM,
+    DXKeeper) read it straight from this record, and the field-by-field
+    senders (N1MM, HRD, MacLoggerDX, K1ALF OMISS Awards) pull it via
+    extract_field(adif, "COMMENT") same as any other field — no per-output
+    special-casing needed.
+    """
+    if extract_field(adif, "APP_NETLOGGER_CLUB").upper() != "OMISS":
+        return adif
+
+    member_id = extract_field(adif, "APP_NETLOGGER_CLUBMEMBERID")
+    if member_id == "?" or not member_id:
+        return adif
+
+    comment = extract_field(adif, "COMMENT")
+    comment = "" if comment == "?" else comment
+    tagged  = f"#{member_id}#" + (f" {comment}" if comment else "")
+
+    new_field = f"<COMMENT:{len(tagged)}>{tagged}"
+    if re.search(r'<COMMENT:\d+>', adif, re.IGNORECASE):
+        return re.sub(r'<COMMENT:\d+>[^<]*', new_field, adif, count=1, flags=re.IGNORECASE)
+    return adif.replace("<EOR>", f"{new_field}<EOR>")
+
+
 def record_dedup_key(adif: str) -> str:
     """
     Build a stable identity for a QSO: QSO_DATE|TIME_ON|CALL|BAND.
@@ -759,9 +789,9 @@ def send_to_dxkeeper(host: str, port: int, adif: str) -> bool:
 #   - His_RST/My_RST are swapped from what their names suggest: confirmed
 #     against two real records that His_RST is RST_Rcvd and My_RST is
 #     RST_Sent, not the other way around.
-#   - Remarks is synthesized as "#{App_NetLogger_ClubMemberId}#", plus a
-#     trailing " {Comment}" if NetLogger recorded one — not a single ADIF
-#     field.
+#   - Remarks is just COMMENT, which apply_omiss_comment_tag() has already
+#     prefixed with "#{App_NetLogger_ClubMemberId}#" for every OMISS contact
+#     before any sender sees the record — not a separate synthesis here.
 # County also needs stripping: NetLogger's Cnty field is "STATE,County"
 # (e.g. "MS,JASPER") but the CSV column wants just "County".
 #
@@ -825,9 +855,7 @@ def build_k1alf_omiss_csv(adif: str) -> str:
     date_fmt = f"{qso_date[0:4]}/{qso_date[4:6]}/{qso_date[6:8]}" if len(qso_date) == 8 else qso_date
     time_fmt = f"{time_on[0:2]}:{time_on[2:4]}:{time_on[4:6]}" if len(time_on) == 6 else time_on
 
-    member_id = field("APP_NETLOGGER_CLUBMEMBERID")
-    comment   = field("COMMENT")
-    remarks   = f"#{member_id}#" + (f" {comment}" if comment else "") if member_id else comment
+    remarks = field("COMMENT")
 
     columns = [
         (date_fmt,                      False),
@@ -1173,7 +1201,7 @@ def run(config_path: str = "config.ini", stop_event=None):
             now = datetime.datetime.now(datetime.timezone.utc)
 
             for raw in read_all_records(adi_path):
-                adif = normalize_adif(raw)
+                adif = apply_omiss_comment_tag(normalize_adif(raw))
                 key  = record_dedup_key(adif)
                 current_keys.add(key)
 
