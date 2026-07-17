@@ -9,6 +9,7 @@ Reads NetLogger's `Contacts.adi` file and forwards new QSOs in near real-time to
 - **DXLab Suite DXKeeper**
 - **MacLoggerDX** (Mac-only; untested, see setup section below)
 - **K1ALF OMISS Awards Tracker** (k1alf.com; only forwards contacts logged under NetLogger's OMISS club)
+- **QRZ Logbook** (requires a QRZ subscription, XML level or higher)
 
 Any combination of outputs can be enabled independently.
 
@@ -122,6 +123,10 @@ my_call = W1AW
 enabled = false
 call_sign = W1AW
 password = YOUR_K1ALF_OMISS_AWARDS_PASSWORD
+
+[qrz]
+enabled = false
+api_key = YOUR_QRZ_LOGBOOK_API_KEY
 ```
 
 ### 2. NetLogger Contacts.adi auto-detection
@@ -253,6 +258,23 @@ own per-QSO operating mode (its "MP Status" field records whether the
 has no way to set the *other* station's status at all. If a contact needs
 "Other End" marked Mobile/Portable, correct it by hand afterward on the
 **Call Log** page — the same place you'd notice it's wrong.
+
+### 11. QRZ Logbook setup
+
+Requires an active QRZ subscription at the XML level or higher — the
+Logbook API is a subscriber-only feature.
+
+1. Log in at qrz.com, go to **Logbook → Settings → API Key**, and generate a
+   Logbook API key (this is *not* the same as the XML/callsign-lookup key)
+2. Set `api_key` in `config.ini`
+3. Set `enabled = true`
+
+A QSO that duplicates one already in your QRZ Logbook is reported as a
+failure rather than overwritten — the bridge doesn't send QRZ's
+`OPTION=REPLACE` flag, since QRZ's own docs warn it can overwrite a QSO
+that's already been confirmed by the other station.
+
+API reference: https://www.qrz.com/docs/logbook/QRZLogbookAPI.html
 
 ---
 

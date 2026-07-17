@@ -18,6 +18,7 @@ import os
 import re
 import configparser
 from pathlib import Path
+from urllib.parse import parse_qsl
 
 try:
     import requests
@@ -196,6 +197,15 @@ call_sign =
 
 # Your K1ALF OMISS Awards Tracker password
 password =
+
+[qrz]
+# Set enabled = true to forward contacts to QRZ Logbook
+# Requires a QRZ subscription (XML level or higher). Get your Logbook API
+# key from QRZ.com > Logbook > Settings > API Key (not the XML lookup key).
+enabled = false
+
+# Your QRZ Logbook API key
+api_key = YOUR_QRZ_LOGBOOK_API_KEY
 """
 
 
@@ -743,6 +753,53 @@ def send_to_dxkeeper(host: str, port: int, adif: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# QRZ Logbook
+# ---------------------------------------------------------------------------
+#
+# POST to logbook.qrz.com/api with ACTION=INSERT and the raw ADIF record —
+# a subscriber-only feature (XML subscription level or higher) requiring a
+# per-user logbook API key (QRZ.com > Logbook > Settings > API Key), not the
+# separate XML/callsign-lookup API key. Response is name=value pairs, not
+# JSON: RESULT=OK (or RESULT=REPLACE, if the QSO duplicated an existing
+# record and OPTION=REPLACE was set) on success, RESULT=FAIL&REASON=... on
+# failure. OPTION=REPLACE is deliberately not sent — QRZ's own docs warn it
+# "WILL overwrite confirmed QSOs", so a plain INSERT that just fails on a
+# duplicate (already-logged QSOs get replayed on every bridge restart's
+# first-run seed) is the safer default. Reference:
+# https://www.qrz.com/docs/logbook/QRZLogbookAPI.html
+_QRZ_API_URL = "https://logbook.qrz.com/api"
+_QRZ_USER_AGENT = "NetLoggerBridge (github.com/MikeWills/NetLogger-Sync)"
+
+
+def send_to_qrz(cfg: configparser.SectionProxy, adif: str) -> bool:
+    payload = {
+        "KEY": cfg["api_key"],
+        "ACTION": "INSERT",
+        "ADIF": adif,
+    }
+    try:
+        resp = requests.post(
+            _QRZ_API_URL,
+            data=payload,
+            headers={"User-Agent": _QRZ_USER_AGENT},
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        log.error(f"QRZ Logbook connection error: {e}")
+        return False
+
+    if resp.status_code != 200:
+        log.error(f"QRZ Logbook HTTP {resp.status_code}: {resp.text[:200]}")
+        return False
+
+    result = dict(parse_qsl(resp.text))
+    if result.get("RESULT") in ("OK", "REPLACE"):
+        return True
+    log.error(f"QRZ Logbook rejected record: {result.get('REASON', resp.text[:200])}")
+    return False
+
+
+# ---------------------------------------------------------------------------
 # K1ALF OMISS Awards Tracker (k1alf.com)
 # ---------------------------------------------------------------------------
 #
@@ -965,6 +1022,7 @@ SERVICE_LABELS = {
     "dxkeeper":            "DXKeeper",
     "macloggerdx":         "MacLoggerDX",
     "k1alf_omiss_awards":  "K1ALF OMISS Awards",
+    "qrz":                 "QRZ Logbook",
 }
 
 
@@ -986,6 +1044,7 @@ def send_to_services(cfg: configparser.ConfigParser, adif: str, enabled: dict, o
                                               cfg["dxkeeper"].getint("port", fallback=52001), adif),
         "macloggerdx": lambda: send_to_macloggerdx(cfg["macloggerdx"], adif),
         "k1alf_omiss_awards": lambda: send_to_k1alf_omiss_awards(cfg["k1alf_omiss_awards"], adif),
+        "qrz":      lambda: send_to_qrz(cfg["qrz"], adif),
     }
     results = {}
     for name, sender in senders.items():
@@ -1151,6 +1210,7 @@ def run(config_path: str = "config.ini", stop_event=None):
         "dxkeeper":    cfg.getboolean("dxkeeper",    "enabled", fallback=False),
         "macloggerdx": cfg.getboolean("macloggerdx", "enabled", fallback=False),
         "k1alf_omiss_awards": cfg.getboolean("k1alf_omiss_awards", "enabled", fallback=False),
+        "qrz":         cfg.getboolean("qrz",         "enabled", fallback=False),
     }
 
     if not any(enabled.values()):
