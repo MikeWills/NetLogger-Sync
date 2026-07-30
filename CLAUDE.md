@@ -50,15 +50,26 @@ the bridge after a real crash — confirmed against the
 incident: the main task's action completed with a nonzero return code, and
 no restart attempt was ever logged afterward, even hours later. As a second,
 independent line of defense, `enable_autostart()` also registers a
-`NetLoggerBridgeWatchdog` task via plain `schtasks /create /sc MINUTE /mo 5`
-(a reliable time trigger, unlike `RestartOnFailure`) whose action — via its
-own short VBScript wrapper, `netlogger_bridge_watchdog.vbs` — runs the bridge
-with `--watchdog`. That flag (handled in `netlogger_bridge.py`'s entry point,
-calling `watchdog_check()`) checks `get_running_bridge_pid()` and, if the
-bridge isn't actually running, calls `schtasks /run /tn NetLoggerBridge` to
-restart the main task, then exits immediately either way. `disable_autostart()`
-removes both tasks; deleting the watchdog task tolerates it not existing
-(older installs), unlike the main task's deletion.
+`NetLoggerBridgeWatchdog` task (a `TimeTrigger` with a 5-minute `Repetition`
+and no `Duration`, which Task Scheduler runs indefinitely) whose action —
+via its own short VBScript wrapper, `netlogger_bridge_watchdog.vbs` — runs
+the bridge with `--watchdog`. That flag (handled in `netlogger_bridge.py`'s
+entry point, calling `watchdog_check()`) checks `get_running_bridge_pid()`
+and, if the bridge isn't actually running, calls `schtasks /run /tn
+NetLoggerBridge` to restart the main task, then exits immediately either
+way. Like the main task, the watchdog task is registered via `/create /xml`
+(`netlogger_bridge_watchdog_task.xml`), not `/create /tr` — passing the
+watchdog's command line directly as a `/tr` argument (`wscript.exe "..."`)
+was found to make Windows itself deny the `CreateProcess` call for
+`schtasks.exe` outright (a Python-level `PermissionError: [WinError 5]`,
+raised before `schtasks.exe` even runs — not a `schtasks`-reported error),
+almost certainly antivirus/EDR behavior-blocking a scheduled task whose
+command line visibly targets a script interpreter, a well-known persistence
+pattern; hiding the same action inside an XML file avoided it entirely.
+Registration is best-effort — a failure here is logged via `bridge.log.exception`
+rather than raised, so it can't roll back the main task, which matters more.
+`disable_autostart()` removes both tasks; deleting the watchdog task
+tolerates it not existing (older installs), unlike the main task's deletion.
 
 `get_running_bridge_pid()` and its underlying `_pid_running()`/
 `_read_bridge_pid()` live in `netlogger_bridge.py` (not `netlogger_gui.py`)

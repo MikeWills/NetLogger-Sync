@@ -7,6 +7,8 @@ netlogger_bridge.log
 netlogger_bridge.pid
 netlogger_bridge_autostart.vbs
 netlogger_bridge_task.xml
+netlogger_bridge_watchdog.vbs
+netlogger_bridge_watchdog_task.xml
 
 # Claude Code local settings
 .claude/
