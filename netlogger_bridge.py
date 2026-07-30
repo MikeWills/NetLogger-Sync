@@ -13,6 +13,8 @@ import struct
 import time
 import socket
 import logging
+import logging.handlers
+import subprocess
 import sys
 import os
 import re
@@ -43,20 +45,46 @@ def resolve_path(path: str) -> Path:
 
 
 PID_FILE = resolve_path("netlogger_bridge.pid")
+TASK_NAME = "NetLoggerBridge"
+WATCHDOG_TASK_NAME = "NetLoggerBridgeWatchdog"
 
 
 # ---------------------------------------------------------------------------
 # Logging setup
+#
+# RotatingFileHandler caps netlogger_bridge.log at 5MB x 5 backups instead of
+# growing forever. A sys.excepthook logs any exception that still escapes
+# every try/except in the codebase (e.g. one raised during startup, before
+# the poll loop's own try/except below is even reached) with a full
+# traceback — previously an uncaught exception's traceback went to stderr,
+# which is discarded when the bridge is launched hidden via the Task
+# Scheduler VBS wrapper, so the process would just vanish mid-log with no
+# record of why.
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(resolve_path("netlogger_bridge.log"), encoding="utf-8"),
+        logging.handlers.RotatingFileHandler(
+            resolve_path("netlogger_bridge.log"),
+            maxBytes=5 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        ),
     ],
 )
 log = logging.getLogger(__name__)
+
+
+def _log_unhandled_exception(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    log.critical("Unhandled exception — bridge is exiting", exc_info=(exc_type, exc_value, exc_traceback))
+
+
+sys.excepthook = _log_unhandled_exception
 
 
 # ---------------------------------------------------------------------------
@@ -1257,62 +1285,72 @@ def run(config_path: str = "config.ini", stop_event=None):
         PID_FILE.write_text(str(os.getpid()))
 
         while stop_event is None or not stop_event.is_set():
-            current_keys = set()
-            now = datetime.datetime.now(datetime.timezone.utc)
+            # Anything unexpected here (a parsing edge case, a transient I/O
+            # error, a bug in a sender not already caught internally) used to
+            # propagate straight out of this loop and kill the whole process
+            # — silently, since the traceback went to stderr, which is
+            # discarded when launched hidden via the autostart wrapper.
+            # Logging and continuing instead makes one bad poll cycle
+            # self-healing rather than fatal.
+            try:
+                current_keys = set()
+                now = datetime.datetime.now(datetime.timezone.utc)
 
-            for raw in read_all_records(adi_path):
-                adif = apply_omiss_comment_tag(normalize_adif(raw))
-                key  = record_dedup_key(adif)
-                current_keys.add(key)
+                for raw in read_all_records(adi_path):
+                    adif = apply_omiss_comment_tag(normalize_adif(raw))
+                    key  = record_dedup_key(adif)
+                    current_keys.add(key)
 
-                record = records.get(key)
-                if record is not None and _is_done(record, enabled):
-                    continue
+                    record = records.get(key)
+                    if record is not None and _is_done(record, enabled):
+                        continue
 
-                callsign = extract_field(adif, "Call")
-                band     = extract_field(adif, "Band")
-                mode     = extract_field(adif, "Mode")
+                    callsign = extract_field(adif, "Call")
+                    band     = extract_field(adif, "Band")
+                    mode     = extract_field(adif, "Mode")
 
-                if record is None:
-                    log.info(f"New contact: {callsign} {band} {mode}")
-                    log.debug(f"ADIF: {adif}")
-                    results = send_to_services(cfg, adif, enabled)
-                    if all(results.values()):
-                        records[key] = results
+                    if record is None:
+                        log.info(f"New contact: {callsign} {band} {mode}")
+                        log.debug(f"ADIF: {adif}")
+                        results = send_to_services(cfg, adif, enabled)
+                        if all(results.values()):
+                            records[key] = results
+                        else:
+                            ts = _now_iso()
+                            records[key] = {**results, "first_attempt": ts, "last_attempt": ts}
+                        save_state(state_file, records)
+                        continue
+
+                    # Previously attempted but incomplete — retry on retry_interval, give up after retry_give_up
+                    if now - _parse_iso(record["last_attempt"]) < retry_interval:
+                        continue
+
+                    # Missing (never attempted, e.g. a service enabled after this
+                    # contact was already forwarded) counts the same as an
+                    # explicit False — both need a send.
+                    failed = {name for name in SERVICE_LABELS if enabled.get(name) and not record.get(name)}
+                    log.info(f"Retrying contact: {callsign} {band} {mode} (pending: {', '.join(sorted(failed))})")
+                    record.update(send_to_services(cfg, adif, enabled, only=failed))
+
+                    if all(record.get(name) for name, on in enabled.items() if on):
+                        record.pop("first_attempt", None)
+                        record.pop("last_attempt", None)
+                    elif now - _parse_iso(record["first_attempt"]) >= retry_give_up:
+                        still = sorted(name for name in SERVICE_LABELS if enabled.get(name) and not record.get(name))
+                        log.warning(f"Giving up on {callsign} {band} {mode} after {retry_give_up.days} day(s) — never reached: {', '.join(still)}")
+                        record["gave_up"] = True
                     else:
-                        ts = _now_iso()
-                        records[key] = {**results, "first_attempt": ts, "last_attempt": ts}
+                        record["last_attempt"] = _now_iso()
+
+                    records[key] = record
                     save_state(state_file, records)
-                    continue
 
-                # Previously attempted but incomplete — retry on retry_interval, give up after retry_give_up
-                if now - _parse_iso(record["last_attempt"]) < retry_interval:
-                    continue
-
-                # Missing (never attempted, e.g. a service enabled after this
-                # contact was already forwarded) counts the same as an
-                # explicit False — both need a send.
-                failed = {name for name in SERVICE_LABELS if enabled.get(name) and not record.get(name)}
-                log.info(f"Retrying contact: {callsign} {band} {mode} (pending: {', '.join(sorted(failed))})")
-                record.update(send_to_services(cfg, adif, enabled, only=failed))
-
-                if all(record.get(name) for name, on in enabled.items() if on):
-                    record.pop("first_attempt", None)
-                    record.pop("last_attempt", None)
-                elif now - _parse_iso(record["first_attempt"]) >= retry_give_up:
-                    still = sorted(name for name in SERVICE_LABELS if enabled.get(name) and not record.get(name))
-                    log.warning(f"Giving up on {callsign} {band} {mode} after {retry_give_up.days} day(s) — never reached: {', '.join(still)}")
-                    record["gave_up"] = True
-                else:
-                    record["last_attempt"] = _now_iso()
-
-                records[key] = record
-                save_state(state_file, records)
-
-            pruned = prune_records(records, current_keys)
-            if len(pruned) != len(records):
-                records = pruned
-                save_state(state_file, records)
+                pruned = prune_records(records, current_keys)
+                if len(pruned) != len(records):
+                    records = pruned
+                    save_state(state_file, records)
+            except Exception:
+                log.exception("Unexpected error during poll cycle — will retry next cycle")
 
             if stop_event is not None:
                 if stop_event.wait(poll_interval):
@@ -1327,6 +1365,60 @@ def run(config_path: str = "config.ini", stop_event=None):
             PID_FILE.unlink()
         except FileNotFoundError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Process detection — shared by the GUI (to show whether a bridge instance,
+# GUI- or autostart-launched, is running) and --watchdog below. Lives here
+# rather than in netlogger_gui.py so a headless watchdog check doesn't need
+# a tkinter dependency.
+# ---------------------------------------------------------------------------
+def _read_bridge_pid() -> "int | None":
+    try:
+        return int(PID_FILE.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def _pid_running(pid: int) -> bool:
+    if sys.platform == "win32":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def get_running_bridge_pid() -> "int | None":
+    """Return the PID of a running bridge process, or None if not running."""
+    pid = _read_bridge_pid()
+    if pid is not None and _pid_running(pid):
+        return pid
+    return None
+
+
+def watchdog_check():
+    """Called via --watchdog, from a separate time-triggered scheduled task
+    (see netlogger_gui.py's enable_autostart). Task Scheduler's own
+    RestartOnFailure setting on the main NetLoggerBridge task is meant to
+    relaunch the bridge on a crash, but was found in practice to silently
+    never fire (confirmed against Task Scheduler's own event log after a
+    real crash — no restart attempt was ever logged), so this polls
+    independently on a reliable time trigger and nudges Task Scheduler to
+    restart the main task if the bridge isn't actually running."""
+    if get_running_bridge_pid() is not None:
+        return
+    log.warning("Watchdog: bridge is not running — triggering restart")
+    if sys.platform == "win32":
+        subprocess.run(["schtasks", "/run", "/tn", TASK_NAME], capture_output=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1346,6 +1438,10 @@ if __name__ == "__main__":
 
     if "--reset-state" in sys.argv:
         reset_state(config_file)
+        sys.exit(0)
+
+    if "--watchdog" in sys.argv:
+        watchdog_check()
         sys.exit(0)
 
     try:

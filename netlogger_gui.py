@@ -30,13 +30,15 @@ CONFIG_ABS_PATH = bridge.resolve_path(CONFIG_PATH)
 # Autostart (Task Scheduler / launchd / systemd) — runs the headless CLI
 # bridge in the background at login, pointed at this GUI's config.ini.
 # ---------------------------------------------------------------------------
-TASK_NAME = "NetLoggerBridge"
+TASK_NAME = bridge.TASK_NAME
+WATCHDOG_TASK_NAME = bridge.WATCHDOG_TASK_NAME
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.netloggerbridge.bridge.plist"
 PLIST_LABEL = "com.netloggerbridge.bridge"
 UNIT_NAME = "netlogger-bridge.service"
 UNIT_PATH = Path.home() / ".config" / "systemd" / "user" / UNIT_NAME
 WRAPPER_PATH = bridge.APP_DIR / "netlogger_bridge_autostart.vbs"
 TASK_XML_PATH = bridge.APP_DIR / "netlogger_bridge_task.xml"
+WATCHDOG_WRAPPER_PATH = bridge.APP_DIR / "netlogger_bridge_watchdog.vbs"
 
 
 def _cli_command() -> list[str]:
@@ -174,6 +176,30 @@ def enable_autostart():
 """
         TASK_XML_PATH.write_text(task_xml, encoding="utf-16")
         _run_schtasks(["/create", "/tn", TASK_NAME, "/xml", str(TASK_XML_PATH), "/f"])
+
+        # Belt-and-suspenders: RestartOnFailure above is Task Scheduler's own
+        # crash-restart mechanism, but it was found in practice to silently
+        # never fire after a real crash (confirmed against Task Scheduler's
+        # own event log — no restart attempt was ever logged, hours after
+        # the main task's action had already exited with a failure code).
+        # A separately time-triggered task is a much more reliable primitive
+        # in Task Scheduler, so this one polls independently every 5 minutes
+        # and re-runs the main task if the bridge isn't actually alive.
+        watchdog_cmd = cmd + ["--watchdog"]
+        watchdog_cmd_line = " ".join(f'"{c}"' for c in watchdog_cmd)
+        watchdog_vbs_cmd = watchdog_cmd_line.replace('"', '""')
+        watchdog_vbs = (
+            f'exitCode = CreateObject("WScript.Shell").Run("{watchdog_vbs_cmd}", 0, True)\n'
+            f'WScript.Quit(exitCode)\n'
+        )
+        WATCHDOG_WRAPPER_PATH.write_text(watchdog_vbs, encoding="utf-8")
+        _run_schtasks([
+            "/create", "/tn", WATCHDOG_TASK_NAME,
+            "/tr", f'wscript.exe "{WATCHDOG_WRAPPER_PATH}"',
+            "/sc", "MINUTE", "/mo", "5",
+            "/rl", "LIMITED",
+            "/f",
+        ])
     elif sys.platform == "darwin":
         args_xml = "\n".join(f"        <string>{c}</string>" for c in cmd)
         plist = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -228,6 +254,12 @@ def disable_autostart():
         _run_schtasks(["/delete", "/tn", TASK_NAME, "/f"])
         WRAPPER_PATH.unlink(missing_ok=True)
         TASK_XML_PATH.unlink(missing_ok=True)
+        # Older installs won't have a watchdog task registered — deleting a
+        # nonexistent task is a non-fatal "not found" error, not "denied",
+        # so it wouldn't hit _run_schtasks' UAC-elevation path anyway; just
+        # ignore failure here the same way the macOS/Linux branches do.
+        subprocess.run(["schtasks", "/delete", "/tn", WATCHDOG_TASK_NAME, "/f"], capture_output=True)
+        WATCHDOG_WRAPPER_PATH.unlink(missing_ok=True)
     elif sys.platform == "darwin":
         subprocess.run(["launchctl", "unload", "-w", str(PLIST_PATH)], check=False)
         PLIST_PATH.unlink(missing_ok=True)
@@ -239,38 +271,11 @@ def disable_autostart():
 
 # ---------------------------------------------------------------------------
 # Bridge process detection — works for any instance (GUI-launched or
-# autostart-launched) via the PID file the bridge writes on startup.
+# autostart-launched) via the PID file the bridge writes on startup. Lives
+# in netlogger_bridge.py so the headless --watchdog CLI mode can share it
+# without a tkinter dependency; aliased here for the GUI's own use.
 # ---------------------------------------------------------------------------
-def _read_bridge_pid() -> int | None:
-    try:
-        return int(bridge.PID_FILE.read_text().strip())
-    except (FileNotFoundError, ValueError):
-        return None
-
-
-def _pid_running(pid: int) -> bool:
-    if sys.platform == "win32":
-        import ctypes
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if handle:
-            ctypes.windll.kernel32.CloseHandle(handle)
-            return True
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
-
-
-def get_running_bridge_pid() -> int | None:
-    """Return the PID of a running bridge process, or None if not running."""
-    pid = _read_bridge_pid()
-    if pid is not None and _pid_running(pid):
-        return pid
-    return None
+get_running_bridge_pid = bridge.get_running_bridge_pid
 
 
 def _stop_bridge_process(pid: int):
