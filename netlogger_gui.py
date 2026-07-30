@@ -30,13 +30,16 @@ CONFIG_ABS_PATH = bridge.resolve_path(CONFIG_PATH)
 # Autostart (Task Scheduler / launchd / systemd) — runs the headless CLI
 # bridge in the background at login, pointed at this GUI's config.ini.
 # ---------------------------------------------------------------------------
-TASK_NAME = "NetLoggerBridge"
+TASK_NAME = bridge.TASK_NAME
+WATCHDOG_TASK_NAME = bridge.WATCHDOG_TASK_NAME
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.netloggerbridge.bridge.plist"
 PLIST_LABEL = "com.netloggerbridge.bridge"
 UNIT_NAME = "netlogger-bridge.service"
 UNIT_PATH = Path.home() / ".config" / "systemd" / "user" / UNIT_NAME
 WRAPPER_PATH = bridge.APP_DIR / "netlogger_bridge_autostart.vbs"
 TASK_XML_PATH = bridge.APP_DIR / "netlogger_bridge_task.xml"
+WATCHDOG_WRAPPER_PATH = bridge.APP_DIR / "netlogger_bridge_watchdog.vbs"
+WATCHDOG_TASK_XML_PATH = bridge.APP_DIR / "netlogger_bridge_watchdog_task.xml"
 
 
 def _cli_command() -> list[str]:
@@ -174,6 +177,73 @@ def enable_autostart():
 """
         TASK_XML_PATH.write_text(task_xml, encoding="utf-16")
         _run_schtasks(["/create", "/tn", TASK_NAME, "/xml", str(TASK_XML_PATH), "/f"])
+
+        # Belt-and-suspenders: RestartOnFailure above is Task Scheduler's own
+        # crash-restart mechanism, but it was found in practice to silently
+        # never fire after a real crash (confirmed against Task Scheduler's
+        # own event log — no restart attempt was ever logged, hours after
+        # the main task's action had already exited with a failure code).
+        # A separately time-triggered task is a much more reliable primitive
+        # in Task Scheduler, so this one polls independently every 5 minutes
+        # and re-runs the main task if the bridge isn't actually alive.
+        #
+        # This must be registered the same way as the main task above — via
+        # /create /xml, not /create /tr — because passing the watchdog's
+        # command line directly as a /tr argument (`wscript.exe "..."`) was
+        # found to make Windows itself deny the CreateProcess call for
+        # schtasks.exe outright (a Python-level PermissionError: [WinError
+        # 5], before schtasks.exe even runs), almost certainly antivirus/EDR
+        # behavior-blocking a scheduled task whose command line visibly
+        # targets a script interpreter — a well-known persistence pattern.
+        # Hiding the same action inside an XML file (as the main task
+        # already did) avoids it entirely.
+        #
+        # Registered best-effort regardless: a hiccup here is logged rather
+        # than raised, so the main task — which matters more — never gets
+        # rolled back by the watchdog's own registration failing.
+        try:
+            watchdog_cmd = cmd + ["--watchdog"]
+            watchdog_cmd_line = " ".join(f'"{c}"' for c in watchdog_cmd)
+            watchdog_vbs_cmd = watchdog_cmd_line.replace('"', '""')
+            watchdog_vbs = (
+                f'exitCode = CreateObject("WScript.Shell").Run("{watchdog_vbs_cmd}", 0, True)\n'
+                f'WScript.Quit(exitCode)\n'
+            )
+            WATCHDOG_WRAPPER_PATH.write_text(watchdog_vbs, encoding="utf-8")
+
+            watchdog_task_xml = f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT5M</Interval>
+      </Repetition>
+      <StartBoundary>2020-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <ExecutionTimeLimit>PT1M</ExecutionTimeLimit>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>wscript.exe</Command>
+      <Arguments>"{WATCHDOG_WRAPPER_PATH}"</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"""
+            WATCHDOG_TASK_XML_PATH.write_text(watchdog_task_xml, encoding="utf-16")
+            _run_schtasks(["/create", "/tn", WATCHDOG_TASK_NAME, "/xml", str(WATCHDOG_TASK_XML_PATH), "/f"])
+        except OSError:
+            bridge.log.exception("Could not register the watchdog task — main autostart task is still active")
     elif sys.platform == "darwin":
         args_xml = "\n".join(f"        <string>{c}</string>" for c in cmd)
         plist = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -228,6 +298,17 @@ def disable_autostart():
         _run_schtasks(["/delete", "/tn", TASK_NAME, "/f"])
         WRAPPER_PATH.unlink(missing_ok=True)
         TASK_XML_PATH.unlink(missing_ok=True)
+        # Older installs won't have a watchdog task registered — deleting a
+        # nonexistent task is a non-fatal "not found" error, not "denied",
+        # so it wouldn't hit _run_schtasks' UAC-elevation path anyway; just
+        # ignore failure here the same way the macOS/Linux branches do (and
+        # the same way registration itself is best-effort — see above).
+        try:
+            subprocess.run(["schtasks", "/delete", "/tn", WATCHDOG_TASK_NAME, "/f"], capture_output=True)
+        except OSError:
+            bridge.log.exception("Could not remove the watchdog task")
+        WATCHDOG_WRAPPER_PATH.unlink(missing_ok=True)
+        WATCHDOG_TASK_XML_PATH.unlink(missing_ok=True)
     elif sys.platform == "darwin":
         subprocess.run(["launchctl", "unload", "-w", str(PLIST_PATH)], check=False)
         PLIST_PATH.unlink(missing_ok=True)
@@ -239,38 +320,11 @@ def disable_autostart():
 
 # ---------------------------------------------------------------------------
 # Bridge process detection — works for any instance (GUI-launched or
-# autostart-launched) via the PID file the bridge writes on startup.
+# autostart-launched) via the PID file the bridge writes on startup. Lives
+# in netlogger_bridge.py so the headless --watchdog CLI mode can share it
+# without a tkinter dependency; aliased here for the GUI's own use.
 # ---------------------------------------------------------------------------
-def _read_bridge_pid() -> int | None:
-    try:
-        return int(bridge.PID_FILE.read_text().strip())
-    except (FileNotFoundError, ValueError):
-        return None
-
-
-def _pid_running(pid: int) -> bool:
-    if sys.platform == "win32":
-        import ctypes
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if handle:
-            ctypes.windll.kernel32.CloseHandle(handle)
-            return True
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
-
-
-def get_running_bridge_pid() -> int | None:
-    """Return the PID of a running bridge process, or None if not running."""
-    pid = _read_bridge_pid()
-    if pid is not None and _pid_running(pid):
-        return pid
-    return None
+get_running_bridge_pid = bridge.get_running_bridge_pid
 
 
 def _stop_bridge_process(pid: int):
@@ -399,13 +453,20 @@ class App(tk.Tk):
         self.process_label = ttk.Label(buttons, text="Bridge process: checking...")
         self.process_label.pack(side="left", padx=10)
 
+        # On its own row rather than crammed into the buttons row above —
+        # that row's combined widget widths (Save Config, Start/Stop, status,
+        # process label) already fill the default window width, so this
+        # checkbox's label was getting clipped by the window edge instead of
+        # wrapping or shrinking anything else.
+        autostart_row = ttk.Frame(self)
+        autostart_row.pack(fill="x", padx=10, pady=(0, 5))
         self.autostart_var = tk.BooleanVar(value=is_autostart_enabled())
         ttk.Checkbutton(
-            buttons,
+            autostart_row,
             text="Run automatically at login (background)",
             variable=self.autostart_var,
             command=self._toggle_autostart,
-        ).pack(side="left", padx=10)
+        ).pack(side="left")
 
         log_frame = ttk.LabelFrame(self, text="Log")
         log_frame.pack(fill="both", expand=True, padx=10, pady=5)
@@ -607,6 +668,7 @@ class App(tk.Tk):
                 disable_autostart()
         except (OSError, subprocess.CalledProcessError) as e:
             self.autostart_var.set(not self.autostart_var.get())
+            bridge.log.exception("Could not update autostart")
             messagebox.showerror("NetLogger Bridge", f"Could not update autostart: {e}")
 
     def _watch_worker(self):

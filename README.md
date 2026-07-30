@@ -298,7 +298,11 @@ python netlogger_gui.py
 The GUI requires Tk, which ships with most Python installs. On some Linux
 distros, install it separately: `sudo apt install python3-tk`.
 
-Logs go to console and `netlogger_bridge.log`.
+Logs go to console and `netlogger_bridge.log` (rotated at 5MB, keeping 5
+backups). Any error that isn't already handled by a specific output sender —
+including one that would previously have crashed the process silently — is
+now caught and logged with a full traceback, either per poll cycle or via a
+top-level exception hook.
 
 The bridge tracks forwarding status per contact in `forwarded_qsos.txt` (or
 whatever `state_file` is set to in `config.ini`) — one JSON object per line,
@@ -351,8 +355,15 @@ service (Linux), and unregisters it when unchecked. Checking it also starts
 the bridge immediately (not just at the next login), as long as it isn't
 already running. On Windows, if Task Scheduler reports access denied, a UAC
 prompt will appear — approve it to register the task. On all three platforms,
-the bridge is automatically restarted if it crashes or is killed. The sections
-below describe doing this manually.
+the bridge is automatically restarted if it crashes or is killed. On Windows
+this is belt-and-suspenders: the main task's own `RestartOnFailure` setting
+is the first line of defense, but a second, independently time-triggered
+`NetLoggerBridgeWatchdog` task also checks every 5 minutes whether the bridge
+is actually running and re-launches it if not — `RestartOnFailure` was found
+in practice to sometimes not fire after a real crash. The bridge's poll loop
+also now catches and logs unexpected errors per cycle instead of letting one
+bad cycle crash the whole process. The sections below describe doing this
+manually.
 
 The GUI's **"Bridge process"** indicator shows whether the bridge is currently
 running, whether it was started from the GUI's Start button or by the

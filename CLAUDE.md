@@ -44,13 +44,45 @@ Task Scheduler notices if it's killed/crashes and restarts it. macOS/Linux get
 the same behavior via launchd's `KeepAlive` and systemd's `Restart=always`,
 which were already in place.
 
-The GUI's "Bridge process" label polls `get_running_bridge_pid()` every 2s,
-which reads `bridge.PID_FILE` (`netlogger_bridge.pid`) and checks the PID is
-still alive (`OpenProcess` on Windows, `os.kill(pid, 0)` elsewhere) — this
-detects the bridge whether it was started by the GUI's own worker thread or by
-the autostart task/service. `_toggle_run` (Start) warns and asks for
-confirmation if it detects another instance already running, since two
-instances sharing one `state_file` can race.
+`RestartOnFailure` was found in practice to sometimes not actually restart
+the bridge after a real crash — confirmed against the
+`Microsoft-Windows-TaskScheduler/Operational` event log after one such
+incident: the main task's action completed with a nonzero return code, and
+no restart attempt was ever logged afterward, even hours later. As a second,
+independent line of defense, `enable_autostart()` also registers a
+`NetLoggerBridgeWatchdog` task (a `TimeTrigger` with a 5-minute `Repetition`
+and no `Duration`, which Task Scheduler runs indefinitely) whose action —
+via its own short VBScript wrapper, `netlogger_bridge_watchdog.vbs` — runs
+the bridge with `--watchdog`. That flag (handled in `netlogger_bridge.py`'s
+entry point, calling `watchdog_check()`) checks `get_running_bridge_pid()`
+and, if the bridge isn't actually running, calls `schtasks /run /tn
+NetLoggerBridge` to restart the main task, then exits immediately either
+way. Like the main task, the watchdog task is registered via `/create /xml`
+(`netlogger_bridge_watchdog_task.xml`), not `/create /tr` — passing the
+watchdog's command line directly as a `/tr` argument (`wscript.exe "..."`)
+was found to make Windows itself deny the `CreateProcess` call for
+`schtasks.exe` outright (a Python-level `PermissionError: [WinError 5]`,
+raised before `schtasks.exe` even runs — not a `schtasks`-reported error),
+almost certainly antivirus/EDR behavior-blocking a scheduled task whose
+command line visibly targets a script interpreter, a well-known persistence
+pattern; hiding the same action inside an XML file avoided it entirely.
+Registration is best-effort — a failure here is logged via `bridge.log.exception`
+rather than raised, so it can't roll back the main task, which matters more.
+`disable_autostart()` removes both tasks; deleting the watchdog task
+tolerates it not existing (older installs), unlike the main task's deletion.
+
+`get_running_bridge_pid()` and its underlying `_pid_running()`/
+`_read_bridge_pid()` live in `netlogger_bridge.py` (not `netlogger_gui.py`)
+specifically so the headless `--watchdog` mode can use them without a
+tkinter dependency; `netlogger_gui.py` just aliases
+`get_running_bridge_pid = bridge.get_running_bridge_pid`. The GUI's "Bridge
+process" label polls it every 2s — reading `bridge.PID_FILE`
+(`netlogger_bridge.pid`) and checking the PID is still alive (`OpenProcess`
+on Windows, `os.kill(pid, 0)` elsewhere) — which detects the bridge whether
+it was started by the GUI's own worker thread or by the autostart
+task/service. `_toggle_run` (Start) warns and asks for confirmation if it
+detects another instance already running, since two instances sharing one
+`state_file` can race.
 
 Checking the autostart box also starts the bridge immediately via
 `start_bridge_now()`, rather than waiting for the next login — on macOS/Linux
@@ -336,6 +368,17 @@ polling loop in `run()`:
    `PID_FILE`/`resolve_path`) and removed in a `finally` block on exit, so the GUI
    can detect whether a bridge process is alive regardless of how it was started.
 
+   The entire per-cycle body (the record loop plus `prune_records`) is wrapped
+   in its own `try/except Exception`, logged via `log.exception(...)` on
+   failure, rather than being allowed to propagate out of the `while` loop.
+   This was added after a real incident where an exception not already
+   caught by an individual `send_to_*` sender's own error handling killed the
+   process outright with no trace in `netlogger_bridge.log` — Python writes
+   an uncaught exception's traceback to stderr, which is discarded when the
+   bridge is launched hidden via the Task Scheduler VBS wrapper (see above).
+   One bad poll cycle is now logged and skipped rather than fatal; the loop
+   still sleeps `poll_interval` afterward as normal before the next cycle.
+
 ## Key implementation notes
 
 - `APP_DIR` (`resolve_path`) anchors `netlogger_bridge.log` and a relative
@@ -362,5 +405,9 @@ polling loop in `run()`:
   `QSO_DATE|TIME_ON|CALL|BAND` instead survives edits to other fields while still
   giving each distinct QSO (including repeat contacts with the same station on
   a different band the same day) a unique identity.
-- Logging goes to both stdout and `netlogger_bridge.log` (set up at module import time
-  in `logging.basicConfig`).
+- Logging goes to both stdout and a `RotatingFileHandler` on `netlogger_bridge.log`
+  (5MB x 5 backups, set up at module import time in `logging.basicConfig`), plus a
+  `sys.excepthook` (`_log_unhandled_exception`) that logs any exception which still
+  escapes every other try/except — e.g. one raised during `run()`'s startup, before
+  the poll loop's own try/except even exists yet — with a full traceback, instead of
+  it silently going to stderr only.
