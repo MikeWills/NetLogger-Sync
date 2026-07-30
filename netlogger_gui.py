@@ -453,13 +453,20 @@ class App(tk.Tk):
         self.process_label = ttk.Label(buttons, text="Bridge process: checking...")
         self.process_label.pack(side="left", padx=10)
 
+        # On its own row rather than crammed into the buttons row above —
+        # that row's combined widget widths (Save Config, Start/Stop, status,
+        # process label) already fill the default window width, so this
+        # checkbox's label was getting clipped by the window edge instead of
+        # wrapping or shrinking anything else.
+        autostart_row = ttk.Frame(self)
+        autostart_row.pack(fill="x", padx=10, pady=(0, 5))
         self.autostart_var = tk.BooleanVar(value=is_autostart_enabled())
         ttk.Checkbutton(
-            buttons,
+            autostart_row,
             text="Run automatically at login (background)",
             variable=self.autostart_var,
             command=self._toggle_autostart,
-        ).pack(side="left", padx=10)
+        ).pack(side="left")
 
         log_frame = ttk.LabelFrame(self, text="Log")
         log_frame.pack(fill="both", expand=True, padx=10, pady=5)
