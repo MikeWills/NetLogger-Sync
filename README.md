@@ -415,3 +415,7 @@ Restart=always
 [Install]
 WantedBy=default.target
 ```
+
+## License
+
+[MIT](LICENSE) — Copyright (c) 2026 Mike Wills
