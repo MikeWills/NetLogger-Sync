@@ -407,6 +407,12 @@ def record_dedup_key(adif: str) -> str:
 # WaveLog
 # ---------------------------------------------------------------------------
 
+def _json_dict(resp: "requests.Response") -> dict:
+    """resp.json() as a dict — {} if the body is valid JSON but not an object."""
+    data = resp.json()
+    return data if isinstance(data, dict) else {}
+
+
 def send_to_wavelog(cfg: configparser.SectionProxy, adif: str) -> bool:
     if cfg.getboolean("use_legacy_api", fallback=True):
         return _send_to_wavelog_v1(cfg, adif)
@@ -425,14 +431,14 @@ def _send_to_wavelog_v1(cfg: configparser.SectionProxy, adif: str) -> bool:
     try:
         resp = requests.post(url, json=payload, timeout=10)
         if resp.status_code in (200, 201):
-            data = resp.json()
+            data = _json_dict(resp)
             if data.get("status") == "created" and data.get("adif_count", 0) > 0:
                 return True
             log.warning(f"WaveLog did not import the record: {data}")
             return False
         log.error(f"WaveLog HTTP {resp.status_code}: {resp.text[:200]}")
         return False
-    except requests.RequestException as e:
+    except (requests.RequestException, ValueError, TypeError) as e:
         log.error(f"WaveLog connection error: {e}")
         return False
 
@@ -449,7 +455,9 @@ def _send_to_wavelog_v2(cfg: configparser.SectionProxy, adif: str) -> bool:
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=10)
         if resp.status_code in (200, 201):
-            data = resp.json().get("data", {})
+            data = _json_dict(resp).get("data")
+            if not isinstance(data, dict):
+                data = {}
             if data.get("imported", 0) > 0:
                 return True
             # skipped > 0 means WaveLog considered it a duplicate — same
@@ -458,7 +466,7 @@ def _send_to_wavelog_v2(cfg: configparser.SectionProxy, adif: str) -> bool:
             return False
         log.error(f"WaveLog API v2 HTTP {resp.status_code}: {resp.text[:200]}")
         return False
-    except (requests.RequestException, ValueError) as e:
+    except (requests.RequestException, ValueError, TypeError) as e:
         log.error(f"WaveLog API v2 error: {e}")
         return False
 

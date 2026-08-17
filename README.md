@@ -151,14 +151,16 @@ If your install differs, set the full path in `[general] contacts_adi`.
 
 ### 3. WaveLog setup
 
-1. In WaveLog, go to **Admin → API Keys** and generate an API key
+1. In WaveLog, open **API Keys** from your account (user) menu and generate an
+   API key
 2. Set `url`, `api_key`, and `station_id` in `config.ini`
 3. Set `enabled = true`
 
 WaveLog 3.1.0 added a second, v2 API alongside the original one. The bridge
 keeps using the original API by default (`use_legacy_api = true`). To switch to
 the v2 API, set `use_legacy_api = false` (in the GUI, uncheck **Use the
-original API** on the WaveLog tab) and generate a **v2** API key in WaveLog —
+original API** on the WaveLog tab) and generate a **v2 API token** from the
+same account menu —
 v2 keys start with `wl2_`, and the two APIs do not accept each other's keys, so
 `api_key` must match whichever API is selected.
 
