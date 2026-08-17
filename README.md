@@ -83,6 +83,7 @@ retry_give_up_days = 5       # days to keep retrying before giving up on a conta
 [wavelog]
 enabled = true
 url = https://log.example.com/index.php
+use_legacy_api = true       # false = use the v2 API added in WaveLog 3.1.0
 api_key = YOUR_WAVELOG_API_KEY
 station_id = 1
 
@@ -154,7 +155,15 @@ If your install differs, set the full path in `[general] contacts_adi`.
 2. Set `url`, `api_key`, and `station_id` in `config.ini`
 3. Set `enabled = true`
 
-API reference: https://docs.wavelog.org/developer/api/
+WaveLog 3.1.0 added a second, v2 API alongside the original one. The bridge
+keeps using the original API by default (`use_legacy_api = true`). To switch to
+the v2 API, set `use_legacy_api = false` (in the GUI, uncheck **Use the
+original API** on the WaveLog tab) and generate a **v2** API key in WaveLog —
+v2 keys start with `wl2_`, and the two APIs do not accept each other's keys, so
+`api_key` must match whichever API is selected.
+
+API reference: https://docs.wavelog.org/developer/api/ (original),
+https://docs.wavelog.org/developer/api-v2/ (v2)
 
 ### 4. N3FJP setup
 

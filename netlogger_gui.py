@@ -392,6 +392,8 @@ class App(tk.Tk):
         notebook.add(wavelog, text="WaveLog")
         self._add_checkbox(wavelog, "wavelog_enabled", "Enable WaveLog")
         self._add_entry(wavelog, "wavelog_url", "WaveLog URL")
+        self._add_checkbox(wavelog, "wavelog_use_legacy_api",
+                           "Use the original API (uncheck for the v2 API in WaveLog 3.1.0+)")
         self._add_entry(wavelog, "wavelog_api_key", "API key")
         self._add_entry(wavelog, "wavelog_station_id", "Station ID")
 
@@ -505,6 +507,8 @@ class App(tk.Tk):
         wavelog = self.cfg["wavelog"]
         self.vars["wavelog_enabled"].set(wavelog.getboolean("enabled", fallback=False))
         self.vars["wavelog_url"].set(wavelog.get("url", ""))
+        self.vars["wavelog_use_legacy_api"].set(
+            wavelog.getboolean("use_legacy_api", fallback=True))
         self.vars["wavelog_api_key"].set(wavelog.get("api_key", ""))
         self.vars["wavelog_station_id"].set(wavelog.get("station_id", "1"))
 
@@ -558,6 +562,8 @@ class App(tk.Tk):
         wavelog = self.cfg["wavelog"]
         wavelog["enabled"] = "true" if self.vars["wavelog_enabled"].get() else "false"
         wavelog["url"] = self.vars["wavelog_url"].get()
+        wavelog["use_legacy_api"] = (
+            "true" if self.vars["wavelog_use_legacy_api"].get() else "false")
         wavelog["api_key"] = self.vars["wavelog_api_key"].get()
         wavelog["station_id"] = self.vars["wavelog_station_id"].get()
 

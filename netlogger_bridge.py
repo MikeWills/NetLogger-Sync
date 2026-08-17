@@ -129,7 +129,14 @@ enabled = false
 # Base URL of your WaveLog instance, including index.php (no trailing slash)
 url = https://log.example.com/index.php
 
-# WaveLog API key (Admin > API Keys in WaveLog)
+# WaveLog 3.1.0 added a new v2 API alongside the original one. Leave this as
+# true to keep using the original API. Set it to false to use the v2 API, which
+# needs a separate v2 API key (it starts with "wl2_"); v1 keys are rejected by
+# the v2 endpoints and vice versa.
+use_legacy_api = true
+
+# WaveLog API key, matching the API version selected above
+# (Account > API Keys in WaveLog)
 api_key = YOUR_WAVELOG_API_KEY
 
 # Station profile ID from WaveLog
@@ -401,6 +408,13 @@ def record_dedup_key(adif: str) -> str:
 # ---------------------------------------------------------------------------
 
 def send_to_wavelog(cfg: configparser.SectionProxy, adif: str) -> bool:
+    if cfg.getboolean("use_legacy_api", fallback=True):
+        return _send_to_wavelog_v1(cfg, adif)
+    return _send_to_wavelog_v2(cfg, adif)
+
+
+def _send_to_wavelog_v1(cfg: configparser.SectionProxy, adif: str) -> bool:
+    """Original (pre-3.1.0) WaveLog API: POST {url}/api/qso with the key in the body."""
     url = cfg["url"].rstrip("/") + "/api/qso"
     payload = {
         "key": cfg["api_key"],
@@ -420,6 +434,32 @@ def send_to_wavelog(cfg: configparser.SectionProxy, adif: str) -> bool:
         return False
     except requests.RequestException as e:
         log.error(f"WaveLog connection error: {e}")
+        return False
+
+
+def _send_to_wavelog_v2(cfg: configparser.SectionProxy, adif: str) -> bool:
+    """WaveLog 3.1.0+ v2 API: POST {url}/api/v2/qso, bearer token, ADIF import body."""
+    url = cfg["url"].rstrip("/") + "/api/v2/qso"
+    payload = {
+        "import_type": "adif",
+        "station_profile_id": cfg.getint("station_id", fallback=1),
+        "adif": adif,
+    }
+    headers = {"Authorization": f"Bearer {cfg['api_key']}"}
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        if resp.status_code in (200, 201):
+            data = resp.json().get("data", {})
+            if data.get("imported", 0) > 0:
+                return True
+            # skipped > 0 means WaveLog considered it a duplicate — same
+            # treatment as the legacy API's 400 "abort" response.
+            log.warning(f"WaveLog did not import the record: {data}")
+            return False
+        log.error(f"WaveLog API v2 HTTP {resp.status_code}: {resp.text[:200]}")
+        return False
+    except (requests.RequestException, ValueError) as e:
+        log.error(f"WaveLog API v2 error: {e}")
         return False
 
 

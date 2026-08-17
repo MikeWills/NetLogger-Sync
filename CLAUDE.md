@@ -12,7 +12,8 @@ commit there, push it, and open a pull request for review (the
 
 Single-file Python bridge (`netlogger_bridge.py`) that tails NetLogger's `Contacts.adi`
 ADIF log file for newly appended QSO records and forwards each one to:
-- **WaveLog** via HTTP REST API (`POST {url}/api/qso`)
+- **WaveLog** via HTTP REST API (`POST {url}/api/qso`, or `POST {url}/api/v2/qso`
+  for the v2 API added in WaveLog 3.1.0)
 - **N3FJP AC Log** via a raw TCP API (`<CMD><ADDADIFRECORD><VALUE>...</CMD>`)
 - **N1MM Logger+** via WSJT-X binary UDP "Log QSO" + "LoggedADIF" packets (types 5/12, schema 2) on port 2237
 - **Ham Radio Deluxe (HRD) Logbook** via its Network Server TCP API (`db add {FIELD="VALUE" ...}`) on port 7826
@@ -176,9 +177,22 @@ polling loop in `run()`:
    `"n3fjp" -> "N3FJP"`). It takes an `only` set so the same function serves both
    a first attempt (every enabled service) and a retry (just the services that
    previously failed for that contact) — see state persistence below.
-   `send_to_wavelog` treats HTTP 200/201 with `status: created` and `adif_count > 0`
-   as success (WaveLog returns 400 `status: abort` for duplicate QSOs — expected
-   when replaying already-logged contacts). `send_to_n3fjp` sends
+   `send_to_wavelog` is a thin switch on `[wavelog] use_legacy_api` (default
+   `true`, so existing configs that predate the option keep their current
+   behavior) over two implementations. `_send_to_wavelog_v1` is the original
+   API: `POST {url}/api/qso` with the key in the JSON body, treating HTTP
+   200/201 with `status: created` and `adif_count > 0` as success (WaveLog
+   returns 400 `status: abort` for duplicate QSOs — expected when replaying
+   already-logged contacts). `_send_to_wavelog_v2` is the v2 API added in
+   WaveLog 3.1.0: `POST {url}/api/v2/qso` with an `Authorization: Bearer`
+   header and a `{import_type: "adif", station_profile_id, adif}` body,
+   treating `data.imported > 0` as success. The two APIs use *different*
+   tokens (v2 keys start with `wl2_` and v1 keys are rejected outright by
+   `/api/v2/...`), but both are stored in the same `api_key` option — one
+   config selects one API, so a second key field would only be a way to have
+   the wrong one active. A v2 duplicate comes back `201` with
+   `imported: 0, skipped: 1`, which is reported as a failure to match v1's
+   handling of its own duplicate response. `send_to_n3fjp` sends
    `<CMD><ADDADIFRECORD><VALUE>...</VALUE></CMD>` followed by `<CMD><CHECKLOG></CMD>`
    over TCP — ADDADIFRECORD writes directly to N3FJP's log file but doesn't refresh
    its on-screen list, and CHECKLOG forces that reload. ADDADIFRECORD itself has no
