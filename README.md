@@ -394,10 +394,13 @@ logged in the meantime go nowhere at all. Two things guard against it:
   timeouts, but those cap single socket operations rather than the whole call,
   which is exactly how the QRZ hang slipped through.
 - **Heartbeat + watchdog.** The bridge touches `netlogger_bridge.heartbeat`
-  at every step of the poll loop. If the watchdog task finds a bridge whose
-  heartbeat hasn't moved in `heartbeat_stale_minutes` (default 5), it kills
-  the process and starts a fresh one — a live PID on its own is not evidence
-  that anything is working.
+  at every step of the poll loop, including while it's idle between polls. If
+  the watchdog task finds a bridge whose heartbeat hasn't moved in
+  `heartbeat_stale_minutes` (default 5), it kills the process and starts a
+  fresh one — a live PID on its own is not evidence that anything is working.
+  The effective stale window is never shorter than twice
+  `sender_timeout_seconds`, so a long sender timeout can't get a healthy
+  bridge killed mid-upload.
 
 Relatedly, the headless bridge now refuses to start if another one is already
 running, rather than letting two instances race each other for the state file.

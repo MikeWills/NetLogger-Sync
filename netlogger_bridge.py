@@ -1151,6 +1151,9 @@ DEFAULT_HEARTBEAT_STALE_MINUTES = 5
 STUCK_SENDER_LIMIT = 3
 _abandoned_sender_threads = []
 
+# Longest the loop ever goes between beats while idle (see sleep_with_heartbeat).
+_HEARTBEAT_INTERVAL = 15
+
 
 def heartbeat():
     """Record that the poll loop is still making progress."""
@@ -1166,6 +1169,28 @@ def heartbeat_age() -> "float | None":
         return max(0.0, time.time() - float(HEARTBEAT_FILE.read_text().strip()))
     except (OSError, ValueError):
         return None
+
+
+def sleep_with_heartbeat(seconds: float, stop_event=None) -> bool:
+    """
+    Wait between poll cycles without letting the heartbeat go stale, and
+    report whether stop_event was set. An idle bridge is still a healthy one,
+    but poll_interval is a free-form user setting with nothing coupling it to
+    heartbeat_stale_minutes — set it to 10 minutes and an unbroken sleep would
+    have the watchdog killing a perfectly good bridge every 5.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        heartbeat()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        slice_ = min(remaining, _HEARTBEAT_INTERVAL)
+        if stop_event is not None:
+            if stop_event.wait(slice_):
+                return True
+        else:
+            time.sleep(slice_)
 
 
 def _live_stuck_senders() -> int:
@@ -1532,11 +1557,8 @@ def run(config_path: str = "config.ini", stop_event=None):
                 restart_requested = True
                 break
 
-            if stop_event is not None:
-                if stop_event.wait(poll_interval):
-                    break
-            else:
-                time.sleep(poll_interval)
+            if sleep_with_heartbeat(poll_interval, stop_event):
+                break
 
         if stop_event is not None:
             log.info("Bridge stopped.")
@@ -1573,6 +1595,27 @@ def _pid_running(pid: int) -> bool:
         import ctypes
 
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        SYNCHRONIZE = 0x00100000
+        WAIT_TIMEOUT = 0x102
+
+        # A process that has exited stays openable for as long as anything
+        # still holds a handle to it — and something always does here, since
+        # the autostart wrapper (wscript.exe) launches the bridge and waits on
+        # it. So "OpenProcess succeeded" is not the same as "still running",
+        # which matters now that _kill_pid has to confirm a kill actually
+        # took. Waiting zero milliseconds on the process object answers the
+        # real question: it's signaled once the process is gone.
+        handle = ctypes.windll.kernel32.OpenProcess(
+            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            try:
+                return ctypes.windll.kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+
+        # SYNCHRONIZE can be refused where plain queries aren't (another
+        # user's process, say). Fall back to the weaker "does it exist" test
+        # rather than reporting a live process as gone.
         handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if handle:
             ctypes.windll.kernel32.CloseHandle(handle)
@@ -1611,6 +1654,20 @@ def _process_image(pid: int) -> str:
             return Path(buf.value).name.lower()
         finally:
             ctypes.windll.kernel32.CloseHandle(handle)
+    # /proc first on Linux: `ps -o comm=` reads /proc/<pid>/comm, which the
+    # kernel truncates to 15 characters (TASK_COMM_LEN is 16 including the
+    # NUL). The frozen Linux build is named "netlogger_bridge" — 16 characters
+    # — so comm reports "netlogger_bridg" and no amount of matching on the
+    # real name would ever hit. cmdline isn't truncated.
+    if sys.platform.startswith("linux"):
+        try:
+            argv0 = Path("/proc") / str(pid) / "cmdline"
+            first = argv0.read_bytes().split(b"\0", 1)[0].decode(errors="replace")
+            if first:
+                return Path(first).name.lower()
+        except OSError:
+            pass
+
     try:
         out = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
                              capture_output=True, text=True, timeout=10)
@@ -1632,22 +1689,42 @@ def _pid_looks_like_bridge(pid: int) -> bool:
     image = _process_image(pid)
     if not image:
         return False  # Can't confirm it's ours, so leave it alone.
-    return image.startswith("python") or image.startswith("netlogger_bridge")
+    # "netlogger_bridg" (not ...ge) so this still matches if _process_image
+    # had to fall back to a 15-character-truncated Linux comm.
+    return image.startswith("python") or image.startswith("netlogger_bridg")
 
 
-def _kill_pid(pid: int):
-    """Terminate a hung bridge so the scheduler can start a healthy one."""
+def _kill_pid(pid: int) -> bool:
+    """
+    Terminate a hung bridge so the scheduler can start a healthy one, and
+    report whether it's actually gone. The caller must not restart on a
+    failed kill: the old process would still hold the state file, and the
+    replacement would race it — precisely the situation this is unwinding.
+    """
     if not _pid_looks_like_bridge(pid):
         log.error(f"Watchdog: PID {pid} doesn't look like a bridge process "
                   "(stale PID file?) — not killing it")
-        return
+        return False
     try:
         if sys.platform == "win32":
-            subprocess.run(["taskkill", "/f", "/pid", str(pid)], capture_output=True)
+            done = subprocess.run(["taskkill", "/f", "/pid", str(pid)], capture_output=True)
+            if done.returncode != 0:
+                log.error(f"Watchdog: taskkill failed for PID {pid}: "
+                          f"{done.stderr.decode(errors='replace').strip()}")
         else:
             os.kill(pid, signal.SIGKILL)
     except OSError as e:
         log.error(f"Watchdog: could not terminate PID {pid}: {e}")
+
+    # Trust the exit status for nothing — ask the OS whether it's really gone.
+    # Even a successful SIGKILL isn't instantaneous.
+    for _ in range(10):
+        if not _pid_running(pid):
+            return True
+        time.sleep(0.5)
+
+    log.error(f"Watchdog: PID {pid} is still alive after being killed")
+    return False
 
 
 def watchdog_check(config_path: str = "config.ini"):
@@ -1670,13 +1747,15 @@ def watchdog_check(config_path: str = "config.ini"):
     pid = get_running_bridge_pid()
 
     if pid is not None:
-        stale_after = 60 * _watchdog_stale_minutes(config_path)
+        stale_after = _watchdog_stale_seconds(config_path)
         age = heartbeat_age()
         if age is None or age < stale_after:
             return
         log.warning(f"Watchdog: bridge (PID {pid}) has made no progress in "
                     f"{int(age)}s — killing it and triggering restart")
-        _kill_pid(pid)
+        if not _kill_pid(pid):
+            log.error("Watchdog: hung bridge is still running — not starting a second one")
+            return
     else:
         log.warning("Watchdog: bridge is not running — triggering restart")
 
@@ -1684,17 +1763,32 @@ def watchdog_check(config_path: str = "config.ini"):
         subprocess.run(["schtasks", "/run", "/tn", TASK_NAME], capture_output=True)
 
 
-def _watchdog_stale_minutes(config_path: str) -> int:
-    """Read heartbeat_stale_minutes without load_config's exit-on-missing-file
-    behavior — a watchdog run must never be the thing that reports a bad
-    config, and the default is a perfectly good answer."""
+def _watchdog_stale_seconds(config_path: str) -> float:
+    """
+    How long a heartbeat may stand still before the bridge counts as hung.
+
+    Read with a bare ConfigParser rather than load_config, which `sys.exit`s
+    on a missing file — a watchdog run must never be the thing that reports a
+    bad config, and the default is a perfectly good answer.
+
+    Floored at twice sender_timeout_seconds, because a single slow-but-legal
+    send is the one stretch where nothing beats: the two options are
+    independently editable, and a config with a long sender timeout and a
+    short stale window would otherwise have the watchdog killing healthy
+    bridges mid-upload.
+    """
+    stale = DEFAULT_HEARTBEAT_STALE_MINUTES * 60
+    sender_timeout = DEFAULT_SENDER_TIMEOUT
     try:
         cfg = configparser.ConfigParser()
         cfg.read(config_path, encoding="utf-8")
-        return max(1, cfg.getint("general", "heartbeat_stale_minutes",
-                                 fallback=DEFAULT_HEARTBEAT_STALE_MINUTES))
+        stale = max(1, cfg.getint("general", "heartbeat_stale_minutes",
+                                  fallback=DEFAULT_HEARTBEAT_STALE_MINUTES)) * 60
+        sender_timeout = max(1, cfg.getint("general", "sender_timeout_seconds",
+                                           fallback=DEFAULT_SENDER_TIMEOUT))
     except (configparser.Error, OSError, ValueError):
-        return DEFAULT_HEARTBEAT_STALE_MINUTES
+        pass
+    return max(stale, 2 * sender_timeout)
 
 
 # ---------------------------------------------------------------------------

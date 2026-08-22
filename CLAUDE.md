@@ -71,10 +71,30 @@ treated as healthy, so a watchdog from a newer build can't kill a running
 bridge from an older one. Killing is gated on `_pid_looks_like_bridge()`,
 which compares the target's executable name (`_process_image()` —
 `QueryFullProcessImageNameW` on Windows, `ps -o comm=` elsewhere) against
-`python*`/`netlogger_bridge*`: a PID file left behind by a bridge that died
+`python*`/`netlogger_bridg*`: a PID file left behind by a bridge that died
 without cleanup names a number the OS is free to reuse, and without this check
 a stale heartbeat could aim the watchdog at an unrelated process. An
-unreadable image name counts as "not ours" and is left alone.
+unreadable image name counts as "not ours" and is left alone. Two subtleties
+there, both found in review:
+
+- On Linux `_process_image` reads `/proc/<pid>/cmdline`, not `ps -o comm=`,
+  because the kernel truncates `comm` to 15 characters (`TASK_COMM_LEN` is 16
+  including the NUL) and the frozen Linux binary is named `netlogger_bridge` —
+  exactly 16. Via `comm` it reads back as `netlogger_bridg` and would never
+  match, silently disabling both the kill and the single-instance guard on
+  precisely the builds that need them. The prefix matched is the 15-character
+  `netlogger_bridg` too, so the `ps` fallback path still works.
+- `_kill_pid` returns whether the process is actually gone, and
+  `watchdog_check` refuses to restart if it isn't — otherwise a declined or
+  failed kill would be followed by starting a second bridge alongside the
+  hung one. Confirming that required fixing `_pid_running`, which used to
+  treat "OpenProcess succeeded" as "still running": on Windows an exited
+  process stays openable while anything holds a handle to it, and the
+  autostart `wscript.exe` wrapper always does, since it launches the bridge
+  and waits on it. It now opens with `SYNCHRONIZE` and calls
+  `WaitForSingleObject(handle, 0)`, treating `WAIT_TIMEOUT` as "still
+  running", with the old existence-only check kept as a fallback for when
+  `SYNCHRONIZE` is refused.
 `_watchdog_stale_minutes` reads that option with a
 bare `ConfigParser` rather than `load_config`, which `sys.exit`s on a missing
 file — a watchdog run must never be the thing that reports a bad config. Like the main task, the watchdog task is registered via `/create /xml`
@@ -447,7 +467,14 @@ Two independent defenses, mirroring the main-task/watchdog-task split:
   `finally`) at every step of the loop; `heartbeat_age()` reads it back for
   `watchdog_check` (above). Both are `OSError`-tolerant: a heartbeat that
   can't be written isn't worth killing the bridge over, and an unreadable one
-  reads as `None`, i.e. healthy.
+  reads as `None`, i.e. healthy. The inter-cycle wait goes through
+  `sleep_with_heartbeat`, which beats every `_HEARTBEAT_INTERVAL` (15s) rather
+  than sleeping straight through `poll_interval` — nothing couples
+  `poll_interval` to `heartbeat_stale_minutes`, so a user raising the former
+  to 10 minutes would otherwise have the watchdog killing a perfectly idle
+  bridge every 5. For the same reason `_watchdog_stale_seconds` floors the
+  stale window at `2 * sender_timeout_seconds`: one slow-but-legal send is the
+  only stretch where nothing beats.
 
 `run()` also refuses to start when `get_running_bridge_pid()` already names a
 live bridge (confirmed via `_pid_looks_like_bridge`). This was hit for real
