@@ -55,10 +55,49 @@ independent line of defense, `enable_autostart()` also registers a
 and no `Duration`, which Task Scheduler runs indefinitely) whose action —
 via its own short VBScript wrapper, `netlogger_bridge_watchdog.vbs` — runs
 the bridge with `--watchdog`. That flag (handled in `netlogger_bridge.py`'s
-entry point, calling `watchdog_check()`) checks `get_running_bridge_pid()`
-and, if the bridge isn't actually running, calls `schtasks /run /tn
-NetLoggerBridge` to restart the main task, then exits immediately either
-way. Like the main task, the watchdog task is registered via `/create /xml`
+entry point, calling `watchdog_check(config_file)`) checks
+`get_running_bridge_pid()` and, if the bridge isn't actually running, calls
+`schtasks /run /tn NetLoggerBridge` to restart the main task, then exits
+immediately either way. "Not running" originally meant only "no live PID",
+which a *hung* bridge satisfies just as well as a healthy one — and one duly
+hung for the better part of an hour inside a TLS handshake to
+`logbook.qrz.com` while the watchdog kept finding it healthy (see "Hang
+detection" below). `watchdog_check` now also treats a live bridge whose
+`heartbeat_age()` exceeds `[general] heartbeat_stale_minutes` (default 5) as
+down: it `_kill_pid()`s it first, since the scheduler won't start a second
+copy while the first is alive and two copies sharing one `state_file` would
+race anyway. A missing heartbeat file reads as `None` and is deliberately
+treated as healthy, so a watchdog from a newer build can't kill a running
+bridge from an older one. Killing is gated on `_pid_looks_like_bridge()`,
+which compares the target's executable name (`_process_image()` —
+`QueryFullProcessImageNameW` on Windows, `ps -o comm=` elsewhere) against
+`python*`/`netlogger_bridg*`: a PID file left behind by a bridge that died
+without cleanup names a number the OS is free to reuse, and without this check
+a stale heartbeat could aim the watchdog at an unrelated process. An
+unreadable image name counts as "not ours" and is left alone. Two subtleties
+there, both found in review:
+
+- On Linux `_process_image` reads `/proc/<pid>/cmdline`, not `ps -o comm=`,
+  because the kernel truncates `comm` to 15 characters (`TASK_COMM_LEN` is 16
+  including the NUL) and the frozen Linux binary is named `netlogger_bridge` —
+  exactly 16. Via `comm` it reads back as `netlogger_bridg` and would never
+  match, silently disabling both the kill and the single-instance guard on
+  precisely the builds that need them. The prefix matched is the 15-character
+  `netlogger_bridg` too, so the `ps` fallback path still works.
+- `_kill_pid` returns whether the process is actually gone, and
+  `watchdog_check` refuses to restart if it isn't — otherwise a declined or
+  failed kill would be followed by starting a second bridge alongside the
+  hung one. Confirming that required fixing `_pid_running`, which used to
+  treat "OpenProcess succeeded" as "still running": on Windows an exited
+  process stays openable while anything holds a handle to it, and the
+  autostart `wscript.exe` wrapper always does, since it launches the bridge
+  and waits on it. It now opens with `SYNCHRONIZE` and calls
+  `WaitForSingleObject(handle, 0)`, treating `WAIT_TIMEOUT` as "still
+  running", with the old existence-only check kept as a fallback for when
+  `SYNCHRONIZE` is refused.
+`_watchdog_stale_minutes` reads that option with a
+bare `ConfigParser` rather than `load_config`, which `sys.exit`s on a missing
+file — a watchdog run must never be the thing that reports a bad config. Like the main task, the watchdog task is registered via `/create /xml`
 (`netlogger_bridge_watchdog_task.xml`), not `/create /tr` — passing the
 watchdog's command line directly as a `/tr` argument (`wscript.exe "..."`)
 was found to make Windows itself deny the `CreateProcess` call for
@@ -176,7 +215,12 @@ polling loop in `run()`:
    `macloggerdx`, `k1alf_omiss_awards`, `qrz`) and `SERVICE_LABELS` (their display names for logging, e.g.
    `"n3fjp" -> "N3FJP"`). It takes an `only` set so the same function serves both
    a first attempt (every enabled service) and a retry (just the services that
-   previously failed for that contact) — see state persistence below.
+   previously failed for that contact) — see state persistence below. Every
+   sender is invoked through `_call_with_timeout` rather than called directly
+   (see "Hang detection" below), and `heartbeat()` is beaten after each one,
+   not just once per poll cycle: forwarding one contact to every output
+   legitimately takes minutes, so a per-cycle heartbeat alone would make a
+   healthy-but-slow cycle indistinguishable from a hang.
    `send_to_wavelog` is a thin switch on `[wavelog] use_legacy_api` (default
    `true`, so existing configs that predate the option keep their current
    behavior) over two implementations. `_send_to_wavelog_v1` is the original
@@ -392,6 +436,59 @@ polling loop in `run()`:
    bridge is launched hidden via the Task Scheduler VBS wrapper (see above).
    One bad poll cycle is now logged and skipped rather than fatal; the loop
    still sleeps `poll_interval` afterward as normal before the next cycle.
+
+## Hang detection
+
+Every sender sets its own network timeouts, but those cap individual socket
+operations, not a whole call. A real incident had `send_to_qrz` blocked inside
+urllib3's `ssl_wrap_socket` (the TLS handshake to `logbook.qrz.com`) for ~50
+minutes despite `requests`' `timeout=10` — confirmed with a live `py-spy dump`
+of the stuck process, which sat at 0% CPU with two `CLOSE_WAIT` sockets. Since
+`run()`'s poll loop is single-threaded, that one wedged call stopped *every*
+output: ten QSOs logged during the hang reached none of the four enabled
+services, and `--watchdog` saw nothing wrong because the process was alive.
+Two independent defenses, mirroring the main-task/watchdog-task split:
+
+- `_call_with_timeout(name, sender, timeout)` runs each sender in a daemon
+  thread and `join(timeout)`s it (`[general] sender_timeout_seconds`, default
+  60). A timeout is reported as an ordinary `False`, so the contact keeps its
+  normal retry/`gave_up` treatment rather than being lost. The thread is
+  *abandoned*, not killed — Python can't interrupt a thread blocked in a
+  C-level socket call — so it keeps its socket until the OS gives up on the
+  connection. `_live_stuck_senders()` counts the ones still wedged, and once
+  `STUCK_SENDER_LIMIT` (3) of them are alive at the end of a poll cycle,
+  `run()` sets `restart_requested`, breaks the loop, and `sys.exit(1)`s after
+  the `finally` cleanup so the scheduler starts a clean process — leaking
+  threads and sockets indefinitely is the worse option. That exit is skipped
+  when `stop_event` is not `None`, since under the GUI `run()` is a worker
+  thread and `sys.exit` there would only kill the thread.
+- `heartbeat()` writes `time.time()` to `HEARTBEAT_FILE`
+  (`netlogger_bridge.heartbeat`, alongside `PID_FILE` and removed by the same
+  `finally`) at every step of the loop; `heartbeat_age()` reads it back for
+  `watchdog_check` (above). Both are `OSError`-tolerant: a heartbeat that
+  can't be written isn't worth killing the bridge over, and an unreadable one
+  reads as `None`, i.e. healthy. The inter-cycle wait goes through
+  `sleep_with_heartbeat`, which beats every `_HEARTBEAT_INTERVAL` (15s) rather
+  than sleeping straight through `poll_interval` — nothing couples
+  `poll_interval` to `heartbeat_stale_minutes`, so a user raising the former
+  to 10 minutes would otherwise have the watchdog killing a perfectly idle
+  bridge every 5. For the same reason `_watchdog_stale_seconds` floors the
+  stale window at `2 * sender_timeout_seconds`: one slow-but-legal send is the
+  only stretch where nothing beats.
+
+`run()` also refuses to start when `get_running_bridge_pid()` already names a
+live bridge (confirmed via `_pid_looks_like_bridge`). This was hit for real
+while testing the watchdog: a manual restart raced the watchdog's own 5-minute
+trigger, both started a bridge, and the second one overwrote `PID_FILE` — so
+killing the *duplicate* left the survivor invisible to the watchdog, which
+would then have started a third. The check is skipped when `stop_event` is not
+`None`, since the GUI's `_toggle_run` already does its own detect-and-confirm
+and a hard refusal would override the user's explicit "start anyway".
+
+Note that an abandoned K1ALF sender can still race the module-level
+`_k1alf_session` if it completes long after being abandoned; the worst case is
+a stale session, which `send_to_k1alf_omiss_awards` already detects and
+re-logs-in for.
 
 ## Key implementation notes
 
