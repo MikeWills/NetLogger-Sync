@@ -79,6 +79,8 @@ contacts_adi =               # leave blank to auto-detect
 state_file = forwarded_qsos.txt
 retry_interval_minutes = 60  # how often to retry a contact that failed to forward
 retry_give_up_days = 5       # days to keep retrying before giving up on a contact
+sender_timeout_seconds = 60  # give up on one unresponsive output and move on
+heartbeat_stale_minutes = 5  # minutes without progress before the watchdog restarts a hung bridge
 
 [wavelog]
 enabled = true
@@ -372,9 +374,38 @@ is the first line of defense, but a second, independently time-triggered
 `NetLoggerBridgeWatchdog` task also checks every 5 minutes whether the bridge
 is actually running and re-launches it if not — `RestartOnFailure` was found
 in practice to sometimes not fire after a real crash. The bridge's poll loop
-also now catches and logs unexpected errors per cycle instead of letting one
+also catches and logs unexpected errors per cycle instead of letting one
 bad cycle crash the whole process. The sections below describe doing this
 manually.
+
+### Hang detection
+
+A crashed bridge is the easy case. The harder one is a bridge that is still
+running but stuck — which has happened for real, with a QRZ upload wedged
+inside its TLS handshake for the better part of an hour. Because the poll loop
+is single-threaded, that one stuck call stops *every* output, and contacts
+logged in the meantime go nowhere at all. Two things guard against it:
+
+- **Per-output deadline.** Each output gets `sender_timeout_seconds` (default
+  60) of wall-clock time. Blow it and the bridge logs
+  `… did not return within 60s — abandoning it`, marks that output failed for
+  the contact, and moves on to the next one; the contact is retried later like
+  any other failure. Individual senders already set their own network
+  timeouts, but those cap single socket operations rather than the whole call,
+  which is exactly how the QRZ hang slipped through.
+- **Heartbeat + watchdog.** The bridge touches `netlogger_bridge.heartbeat`
+  at every step of the poll loop. If the watchdog task finds a bridge whose
+  heartbeat hasn't moved in `heartbeat_stale_minutes` (default 5), it kills
+  the process and starts a fresh one — a live PID on its own is not evidence
+  that anything is working.
+
+Relatedly, the headless bridge now refuses to start if another one is already
+running, rather than letting two instances race each other for the state file.
+(The GUI's **Start** button still asks first and lets you override.)
+
+Raise `heartbeat_stale_minutes` if you have many outputs enabled and a slow
+link, and lower `sender_timeout_seconds` if you'd rather a flaky service be
+skipped quickly and retried later than hold up the rest.
 
 The GUI's **"Bridge process"** indicator shows whether the bridge is currently
 running, whether it was started from the GUI's Start button or by the
