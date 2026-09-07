@@ -18,7 +18,7 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 import netlogger_bridge as bridge
 
@@ -379,7 +379,7 @@ class App(tk.Tk):
         general = ttk.LabelFrame(self, text="General")
         general.pack(fill="x", padx=10, pady=5)
         self._add_entry(general, "poll_interval", "Poll interval (seconds)")
-        self._add_entry(general, "contacts_adi", "Contacts.adi path (blank = auto-detect)")
+        self._add_path_entry(general, "contacts_adi", "Contacts.adi path (blank = auto-detect)")
         self._add_entry(general, "state_file", "State file")
         self._add_entry(general, "retry_interval_minutes", "Retry interval (minutes)")
         self._add_entry(general, "retry_give_up_days", "Give up retrying after (days)")
@@ -483,6 +483,61 @@ class App(tk.Tk):
         entry = ttk.Entry(row, textvariable=var, show="*" if secret else "")
         entry.pack(side="left", fill="x", expand=True)
         self.vars[key] = var
+
+    def _add_path_entry(self, parent, key, label):
+        """Like _add_entry, but with Browse / Auto-detect buttons.
+
+        NetLogger keeps Contacts.adi in ~/.config/NetLogger on macOS and Linux,
+        which Finder and most file managers hide by default, so typing the path
+        by hand is the one thing users should not have to do here (issue #29).
+        """
+        row = ttk.Frame(parent)
+        row.pack(fill="x", padx=5, pady=2)
+        ttk.Label(row, text=label, width=32).pack(side="left")
+        var = tk.StringVar()
+        self.vars[key] = var
+        # Buttons are packed before the entry so the entry gets the slack.
+        ttk.Button(row, text="Auto-detect", width=12,
+                   command=lambda: self._detect_adi(var)).pack(side="right", padx=(4, 0))
+        ttk.Button(row, text="Browse...", width=10,
+                   command=lambda: self._browse_adi(var)).pack(side="right", padx=(4, 0))
+        ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
+
+    def _adi_start_dir(self, current: str) -> Path:
+        """Best directory to open the file picker in."""
+        if current.strip():
+            parent = Path(current).expanduser().parent
+            if parent.is_dir():
+                return parent
+        found = bridge.autodetect_adi_file()
+        if found:
+            return found.parent
+        for candidate in bridge.adi_candidates():
+            if candidate.parent.is_dir():
+                return candidate.parent
+        return Path.home()
+
+    def _browse_adi(self, var):
+        path = filedialog.askopenfilename(
+            title="Select NetLogger Contacts.adi",
+            initialdir=str(self._adi_start_dir(var.get())),
+            filetypes=[("ADIF log", "*.adi *.adif"), ("All files", "*.*")],
+        )
+        if path:
+            var.set(path)
+
+    def _detect_adi(self, var):
+        found = bridge.autodetect_adi_file()
+        if found:
+            var.set(str(found))
+            messagebox.showinfo("Contacts.adi", f"Found:\n\n{found}")
+            return
+        tried = "\n".join(f"    {c}" for c in bridge.adi_candidates())
+        messagebox.showwarning(
+            "Contacts.adi",
+            "Could not find Contacts.adi automatically.\n\nLooked in:\n"
+            f"{tried}\n\nUse Browse... to select it by hand.",
+        )
 
     def _add_checkbox(self, parent, key, label):
         var = tk.BooleanVar()
