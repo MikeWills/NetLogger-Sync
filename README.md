@@ -430,6 +430,31 @@ the bridge writes on startup and removes on exit. If you click **Start** while
 another instance is already running (e.g. the autostart task), the GUI warns
 you before launching a second one.
 
+### Shutting down cleanly
+
+When the computer restarts or shuts down, the bridge is told to stop and
+unwinds properly: it finishes what it is doing, removes its PID and heartbeat
+files, and exits. That matters for two reasons — a leftover PID file makes the
+GUI report a bridge that isn't running (and gives the watchdog a dead process
+to reason about), and a half-written state file would make the bridge re-send
+contacts it had already forwarded the next time it starts.
+
+| OS | How the bridge is told to stop |
+|----|-------------------------------|
+| Windows | Console shutdown/logoff events, plus `Ctrl+Break` |
+| macOS   | `SIGTERM` from launchd |
+| Linux   | `SIGTERM` from systemd |
+
+The state file is also written atomically now (written alongside, then moved
+into place), so even a power cut or a forced kill can't leave it half-written
+— you get either the previous version or the new one, never a truncated mix.
+
+Closing the GUI window stops a bridge it started and waits briefly for it to
+finish, instead of pulling the process out from under it.
+
+`Ctrl+C` in a terminal is unchanged, and is still the way to interrupt a
+bridge that's stuck mid-upload.
+
 ### Windows (Task Scheduler)
 - Action: `python C:\path\to\netlogger_bridge.py`
 - Trigger: At log on / At startup
