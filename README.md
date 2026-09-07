@@ -134,15 +134,28 @@ api_key = YOUR_QRZ_LOGBOOK_API_KEY
 
 ### 2. NetLogger Contacts.adi auto-detection
 
-If `contacts_adi` is blank, the bridge looks here by default:
+If `contacts_adi` is blank, the bridge looks in these locations, in order,
+and uses the first one that exists:
 
-| OS      | Default path |
-|---------|--------------|
-| Windows | `%APPDATA%\NetLogger\Contacts.adi` |
-| macOS   | `~/Library/Application Support/NetLogger/Contacts.adi` |
+| OS      | Default paths |
+|---------|---------------|
+| Windows | `%APPDATA%\NetLogger\Contacts.adi`, then `~\.config\NetLogger\Contacts.adi` |
+| macOS   | `~/.config/NetLogger/Contacts.adi`, then `~/Library/Application Support/NetLogger/Contacts.adi` |
 | Linux   | `~/.config/NetLogger/Contacts.adi` |
 
-If your install differs, set the full path in `[general] contacts_adi`.
+If your install differs, set the full path in `[general] contacts_adi`, or use
+the **Browse...** / **Auto-detect** buttons next to that field in the GUI. If
+auto-detection fails, the log lists every path it tried.
+
+> **macOS and Linux users:** NetLogger stores the file in `~/.config/NetLogger`,
+> *not* under `~/Library/Application Support`, and NetLogger's own
+> **View > Directories** window doesn't show you the path. `~/.config` starts
+> with a dot, so Finder hides it by default. To get there:
+>
+> - **Finder:** press `Cmd+Shift+G`, paste `~/.config/NetLogger`, press Enter.
+>   (`Cmd+Shift+.` toggles hidden files in any Finder window, including the
+>   GUI's **Browse...** dialog.)
+> - **Terminal:** `find ~ -iname "Contacts.adi" 2>/dev/null`
 
 > **Note:** On first run, the bridge marks every QSO already in
 > `Contacts.adi` as already forwarded (without sending any of them) — only

@@ -116,8 +116,10 @@ poll_interval = 10
 # Path to NetLogger's Contacts.adi file.
 # Leave blank to auto-detect from default OS locations.
 # Windows default: %APPDATA%\\NetLogger\\Contacts.adi
-# macOS default:   ~/Library/Application Support/NetLogger/Contacts.adi
+# macOS default:   ~/.config/NetLogger/Contacts.adi
 # Linux default:   ~/.config/NetLogger/Contacts.adi
+# On macOS/Linux that directory is hidden; in Finder press Cmd+Shift+G and
+# paste ~/.config/NetLogger to reach it.
 contacts_adi =
 
 # File used to track which contacts have already been forwarded, between restarts
@@ -286,11 +288,39 @@ def load_config_for_gui(config_path: str) -> configparser.ConfigParser:
 # ---------------------------------------------------------------------------
 # ADI file location
 # ---------------------------------------------------------------------------
+# Candidates are tried in order; the first that exists wins. macOS is listed
+# with ~/.config first because that is where NetLogger actually writes on a
+# Mac (verified against a real install) — it follows the same XDG-style
+# convention it uses on Linux rather than ~/Library/Application Support, which
+# it never creates. Getting this wrong made auto-detection impossible on every
+# Mac, and ~/.config is hidden in Finder, so the user could not easily find the
+# file to configure it by hand either (issue #29).
 ADI_PATHS = {
-    "win32":  Path(os.environ.get("APPDATA", "~"), "NetLogger", "Contacts.adi"),
-    "darwin": Path("~/Library/Application Support/NetLogger/Contacts.adi").expanduser(),
-    "linux":  Path("~/.config/NetLogger/Contacts.adi").expanduser(),
+    "win32": [
+        Path(os.environ.get("APPDATA", "~"), "NetLogger", "Contacts.adi"),
+        Path("~/.config/NetLogger/Contacts.adi").expanduser(),
+    ],
+    "darwin": [
+        Path("~/.config/NetLogger/Contacts.adi").expanduser(),
+        Path("~/Library/Application Support/NetLogger/Contacts.adi").expanduser(),
+    ],
+    "linux": [
+        Path("~/.config/NetLogger/Contacts.adi").expanduser(),
+    ],
 }
+
+
+def adi_candidates() -> list[Path]:
+    """Default Contacts.adi locations for this platform, in priority order."""
+    return ADI_PATHS.get(sys.platform, ADI_PATHS["linux"])
+
+
+def autodetect_adi_file() -> Path | None:
+    """First existing default Contacts.adi location, or None if there is none."""
+    for candidate in adi_candidates():
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def find_adi_file(cfg_path: str) -> Path:
@@ -301,15 +331,16 @@ def find_adi_file(cfg_path: str) -> Path:
             sys.exit(1)
         return p
 
-    platform = sys.platform if sys.platform != "win32" else "win32"
-    default = ADI_PATHS.get(platform)
-    if default and default.exists():
-        log.info(f"Auto-detected Contacts.adi: {default}")
-        return default
+    found = autodetect_adi_file()
+    if found:
+        log.info(f"Auto-detected Contacts.adi: {found}")
+        return found
 
+    tried = "\n  ".join(str(c) for c in adi_candidates())
     log.error(
-        "Could not auto-detect Contacts.adi. "
-        "Set [general] contacts_adi in config.ini"
+        "Could not auto-detect Contacts.adi. Looked in:\n  "
+        f"{tried}\n"
+        "Set [general] contacts_adi in config.ini to the full path."
     )
     sys.exit(1)
 

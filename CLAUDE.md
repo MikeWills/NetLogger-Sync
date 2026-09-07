@@ -177,8 +177,24 @@ polling loop in `run()`:
 1. **Config** (`load_config`, `create_sample_config`) — `configparser`-based, sections
    `[general]`, `[wavelog]`, `[n3fjp]`, `[n1mm]`, `[hrd]`, `[log4om]`, `[dxkeeper]`,
    `[macloggerdx]`, `[k1alf_omiss_awards]`, `[qrz]`.
-2. **ADI file location** (`find_adi_file`, `ADI_PATHS`) — locates NetLogger's
-   `Contacts.adi`, auto-detecting an OS-specific default path if `contacts_adi` is blank.
+2. **ADI file location** (`find_adi_file`, `autodetect_adi_file`,
+   `adi_candidates`, `ADI_PATHS`) — locates NetLogger's `Contacts.adi`,
+   auto-detecting from OS-specific default paths if `contacts_adi` is blank.
+   `ADI_PATHS` maps each platform to an ordered *list* of candidates (first
+   existing one wins), not a single path, and `find_adi_file` logs every path
+   it tried when none match. macOS's first candidate is
+   `~/.config/NetLogger/Contacts.adi`, verified against a real Mac install:
+   NetLogger uses the same XDG-style directory there as on Linux and never
+   creates `~/Library/Application Support/NetLogger`, which the single
+   hard-coded darwin path used to point at — so auto-detection could not
+   succeed on *any* Mac, and `~/.config` being hidden in Finder (and absent
+   from NetLogger's own View > Directories window) made configuring it by hand
+   painful too (issue #29). The old `~/Library/...` path is kept as a
+   secondary candidate in case a future version moves there. The GUI's
+   Contacts.adi field is built by `_add_path_entry` rather than `_add_entry`,
+   giving it **Browse...** (`_browse_adi`, opening in `_adi_start_dir`'s best
+   guess so the hidden directory is already on screen) and **Auto-detect**
+   (`_detect_adi`, which reports the candidate list on failure) buttons.
 3. **ADIF file tailer** (`read_all_records`, `normalize_adif`, `extract_field`,
    `apply_omiss_comment_tag`, `record_dedup_key`) — `read_all_records` reads the
    *entire* `Contacts.adi` file
