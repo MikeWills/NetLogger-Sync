@@ -490,6 +490,68 @@ Note that an abandoned K1ALF sender can still race the module-level
 a stale session, which `send_to_k1alf_omiss_awards` already detects and
 re-logs-in for.
 
+## Shutdown handling
+
+`run()`'s `finally` removes `PID_FILE`/`HEARTBEAT_FILE`, but only if the
+process actually unwinds, and by default it doesn't. launchd and systemd stop
+the bridge with `SIGTERM`, whose default disposition terminates the process
+outright — no `finally`, no `atexit`. Windows never sends `SIGTERM` at all: at
+shutdown/logoff it sends the console `CTRL_SHUTDOWN_EVENT`/`CTRL_LOGOFF_EVENT`
+to console processes (which the autostart task's hidden bridge is), and
+Python's default handling of those is an immediate `ExitProcess`. Confirmed by
+experiment that a `taskkill /F`-style termination leaves cleanup files behind
+while a console control event delivered to a `SetConsoleCtrlHandler` callback
+does not. So every shutdown used to leave a stale PID file naming a process
+that no longer exists — which makes the GUI report a running bridge, and hands
+the single-instance guard and `watchdog_check` a dead PID that the OS is free
+to reuse for some other `python*` process later.
+
+`install_shutdown_handlers()` (called from the entry point, and from the GUI's
+`__main__` — `signal.signal` only works on the main thread, so `run()` can't
+call it itself when the GUI runs it in a worker) installs a `SIGTERM` handler
+plus, on Windows, `SIGBREAK` and a `SetConsoleCtrlHandler` callback for
+`CTRL_CLOSE`/`CTRL_LOGOFF`/`CTRL_SHUTDOWN`. All of them just call
+`request_shutdown()`, which sets the module-level `_shutdown_event` the poll
+loop already knows how to honour, so shutdown goes through the same `finally`
+as any other exit. `SIGINT` is deliberately *not* taken over: `Ctrl-C` already
+unwinds cleanly as a `KeyboardInterrupt`, and handling it would remove the one
+way an interactive user can break out of a sender wedged in a socket. The
+console callback must keep a live reference (`_console_ctrl_handler`) or it is
+collected and the process faults; it runs on its own thread and the OS kills
+the process shortly after it returns, so it waits `_SHUTDOWN_GRACE_SECONDS`
+(3) on `_shutdown_complete` for the loop's own cleanup and then calls the
+idempotent `_cleanup_runtime_files()` itself rather than risk being killed
+waiting.
+
+`sleep_with_heartbeat` — where the bridge sits for almost all of its life, and
+therefore where a shutdown signal almost always lands — now waits in
+`_SHUTDOWN_POLL_INTERVAL` (1s) slices while keeping the heartbeat on its own
+slower `_HEARTBEAT_INTERVAL` cadence. Waiting a full heartbeat slice was
+measured at ~13s to notice a shutdown, well past the ~5s Windows gives a
+process; in 1s slices it is ~0.1s. The slicing is needed because Windows will
+not run a Python signal handler while the main thread is parked in a lock
+wait, so the flag is only seen once the wait returns (on POSIX, setting the
+event releases the wait immediately).
+
+`save_state` writes to a temp file in the same directory, `fsync`s, and
+`os.replace()`s it into place. The old plain `write_text` truncated first and
+filled in after, so a process killed mid-write left a half-written file — and
+because the file still *exists*, `load_state` reports `initialized: True` and
+simply doesn't see the records past the truncation point, re-forwarding every
+one of those contacts on the next start (duplicate QSOs to WaveLog/QRZ being
+the most user-visible failure this program has). A failed write is logged and
+swallowed rather than raised: the records are still in memory and the next
+cycle retries.
+
+The GUI's `_on_close` sets `stop_event` and `join()`s the worker for up to
+`SHUTDOWN_WAIT_SECONDS` (5) before `destroy()`. The worker is a daemon thread,
+so destroying the window used to end the process out from under `run()` —
+same stale-file problem, plus a chance of dying mid state-file write. The wait
+is bounded so a wedged sender can't hold the window open. `_poll_shutdown`
+polls `shutdown_requested()` from the Tk event loop (a signal handler can't
+safely touch Tk, and Tk doesn't run Python signal handlers while idle) and
+routes an OS shutdown of the GUI process through the same `_on_close`.
+
 ## Key implementation notes
 
 - `APP_DIR` (`resolve_path`) anchors `netlogger_bridge.log` and a relative

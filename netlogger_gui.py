@@ -338,6 +338,23 @@ def _stop_bridge_process(pid: int):
         pass
 
 
+# Longest the GUI will wait for a bridge worker to unwind before closing.
+SHUTDOWN_WAIT_SECONDS = 5.0
+
+
+def _poll_shutdown(app):
+    """
+    Bridge the signal world to the Tk world.
+
+    A signal handler can't safely touch Tk, and Tk's event loop doesn't run
+    Python signal handlers while it's idle, so the flag is polled instead.
+    """
+    if bridge.shutdown_requested():
+        app._on_close()
+        return
+    app.after(200, _poll_shutdown, app)
+
+
 class QueueHandler(logging.Handler):
     """Logging handler that pushes formatted records onto a queue for the GUI thread."""
 
@@ -715,10 +732,34 @@ class App(tk.Tk):
         self.after(200, self._poll_log_queue)
 
     def _on_close(self):
+        """
+        Stop a GUI-started bridge and give it a moment to clean up.
+
+        The worker runs bridge.run() as a daemon thread, so destroying the
+        window used to end the process out from under it: no PID/heartbeat
+        cleanup, and a small chance of being killed part-way through a state
+        file write. Setting stop_event and waiting briefly lets run()'s finally
+        do its job. The wait is bounded because a sender wedged in a socket
+        (see the bridge's hang detection) could otherwise hold the window open
+        indefinitely, and a user closing a window expects it to close.
+        """
         if self.stop_event:
             self.stop_event.set()
+        worker = getattr(self, "worker", None)
+        if worker is not None and worker.is_alive():
+            worker.join(SHUTDOWN_WAIT_SECONDS)
+            if worker.is_alive():
+                bridge.log.warning(
+                    "Bridge did not stop in time — leaving cleanup to the next run"
+                )
         self.destroy()
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    app = App()
+    # An OS shutdown or logoff signals the GUI process too; route it through
+    # the same path as clicking the window's close button so a GUI-started
+    # bridge stops cleanly rather than being killed mid-write.
+    bridge.install_shutdown_handlers()
+    app.after(200, _poll_shutdown, app)
+    app.mainloop()

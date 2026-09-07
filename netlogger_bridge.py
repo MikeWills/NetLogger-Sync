@@ -1171,26 +1171,171 @@ def heartbeat_age() -> "float | None":
         return None
 
 
+# ---------------------------------------------------------------------------
+# Shutdown handling
+#
+# run()'s finally block removes PID_FILE/HEARTBEAT_FILE, but it only gets the
+# chance if the process actually unwinds. By default it doesn't: on macOS and
+# Linux, launchd and systemd stop the bridge with SIGTERM, whose default
+# disposition kills the process outright — no finally, no atexit. On Windows,
+# shutdown/logoff sends the console CTRL_SHUTDOWN_EVENT/CTRL_LOGOFF_EVENT,
+# which Python's default handler turns into an immediate ExitProcess. Either
+# way the bridge leaves a PID file naming a process that no longer exists,
+# which makes the GUI report a running bridge that isn't, and gives the
+# single-instance guard and the watchdog a dead PID to reason about (one the
+# OS is free to hand to some other python process later).
+#
+# So: catch the signals we can, set a flag the poll loop already knows how to
+# honour, and let the normal finally do the cleanup.
+# ---------------------------------------------------------------------------
+_shutdown_event = threading.Event()
+_shutdown_complete = threading.Event()
+
+# SetConsoleCtrlHandler does not keep a reference to the callback, so it has
+# to stay alive here or it gets collected and the process faults on shutdown.
+_console_ctrl_handler = None
+
+# How long a Windows console handler waits for the poll loop to finish its own
+# cleanup before doing it directly. The OS kills the process shortly after the
+# handler returns (about 5s for CTRL_CLOSE), so this cannot be generous.
+_SHUTDOWN_GRACE_SECONDS = 3.0
+
+# How often the inter-cycle sleep checks for a shutdown request.
+_SHUTDOWN_POLL_INTERVAL = 1.0
+
+
+def shutdown_requested() -> bool:
+    return _shutdown_event.is_set()
+
+
+def _cleanup_runtime_files():
+    """Remove the PID and heartbeat files. Idempotent and never raises."""
+    for path in (PID_FILE, HEARTBEAT_FILE):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            log.warning(f"Could not remove {path} during shutdown")
+
+
+def request_shutdown(reason: str):
+    """Ask the poll loop to stop and unwind normally."""
+    if _shutdown_event.is_set():
+        return
+    log.info(f"Shutdown requested ({reason}) — stopping bridge")
+    _shutdown_event.set()
+
+
+def install_shutdown_handlers():
+    """
+    Install handlers so an OS shutdown, logoff, or service stop unwinds
+    cleanly. Must be called from the main thread (signal.signal's own
+    requirement); a failure to install is logged, never fatal, since a bridge
+    that runs with untidy shutdown beats one that won't start.
+    """
+    def _signal_handler(signum, _frame):
+        request_shutdown(f"signal {signum}")
+
+    # SIGTERM is what systemd and launchd send to stop a service. SIGINT is
+    # deliberately left alone: Ctrl-C already unwinds through run()'s finally
+    # as a KeyboardInterrupt, and taking it over would cost the one way an
+    # interactive user has to break out of a sender wedged in a socket — the
+    # exact failure this program has already been bitten by.
+    signals = [signal.SIGTERM]
+    if sys.platform == "win32":
+        signals.append(signal.SIGBREAK)
+
+    for sig in signals:
+        try:
+            signal.signal(sig, _signal_handler)
+        except (ValueError, OSError, AttributeError):
+            log.debug(f"Could not install handler for signal {sig}", exc_info=True)
+
+    if sys.platform == "win32":
+        _install_console_ctrl_handler()
+
+
+def _install_console_ctrl_handler():
+    """
+    Handle the Windows console control events for shutdown and logoff.
+
+    Windows does not deliver SIGTERM; at shutdown it sends CTRL_SHUTDOWN_EVENT
+    (and CTRL_LOGOFF_EVENT at logoff) to console processes, which is what the
+    autostart task's hidden bridge is. Python's default handling of those is to
+    exit immediately, so without this the finally never runs.
+
+    The handler runs on its own thread and the OS terminates the process soon
+    after it returns, so it gives the poll loop a short grace period to finish
+    its own cleanup and then does the (idempotent) cleanup itself rather than
+    risk being killed waiting.
+    """
+    global _console_ctrl_handler
+
+    CTRL_CLOSE_EVENT = 2
+    CTRL_LOGOFF_EVENT = 5
+    CTRL_SHUTDOWN_EVENT = 6
+    handled = {CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT}
+
+    try:
+        import ctypes
+
+        prototype = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+
+        @prototype
+        def _handler(event):
+            if event not in handled:
+                return False  # let Python's own Ctrl-C/Ctrl-Break handling run
+            request_shutdown(f"console event {event}")
+            _shutdown_complete.wait(_SHUTDOWN_GRACE_SECONDS)
+            _cleanup_runtime_files()
+            return True
+
+        if not ctypes.windll.kernel32.SetConsoleCtrlHandler(_handler, True):
+            log.debug("SetConsoleCtrlHandler failed")
+            return
+        _console_ctrl_handler = _handler
+    except (ImportError, AttributeError, OSError):
+        log.debug("Could not install console control handler", exc_info=True)
+
+
 def sleep_with_heartbeat(seconds: float, stop_event=None) -> bool:
     """
     Wait between poll cycles without letting the heartbeat go stale, and
-    report whether stop_event was set. An idle bridge is still a healthy one,
-    but poll_interval is a free-form user setting with nothing coupling it to
-    heartbeat_stale_minutes — set it to 10 minutes and an unbroken sleep would
-    have the watchdog killing a perfectly good bridge every 5.
+    report whether stop_event (or a shutdown request) was set. An idle bridge
+    is still a healthy one, but poll_interval is a free-form user setting with
+    nothing coupling it to heartbeat_stale_minutes — set it to 10 minutes and
+    an unbroken sleep would have the watchdog killing a perfectly good bridge
+    every 5.
+
+    Shutdown is checked on the same slices: the bridge is asleep here for most
+    of its life, so this is where a shutdown signal almost always lands, and
+    waiting out the rest of poll_interval first could easily overrun the time
+    the OS is willing to give us.
     """
     deadline = time.monotonic() + seconds
+    next_beat = 0.0
     while True:
-        heartbeat()
-        remaining = deadline - time.monotonic()
+        now = time.monotonic()
+        if now >= next_beat:
+            heartbeat()
+            next_beat = now + _HEARTBEAT_INTERVAL
+        if _shutdown_event.is_set():
+            return True
+        remaining = deadline - now
         if remaining <= 0:
             return False
-        slice_ = min(remaining, _HEARTBEAT_INTERVAL)
-        if stop_event is not None:
-            if stop_event.wait(slice_):
-                return True
-        else:
-            time.sleep(slice_)
+
+        # Waking about once a second costs nothing and bounds how long a
+        # shutdown can sit unnoticed. Windows will not run a Python signal
+        # handler while the main thread is parked in a lock wait, so the flag
+        # is only seen when the wait returns — with a full _HEARTBEAT_INTERVAL
+        # slice that was measured at ~13s, well past the ~5s Windows gives a
+        # process at shutdown. The heartbeat keeps its own slower cadence.
+        slice_ = min(remaining, next_beat - now, _SHUTDOWN_POLL_INTERVAL)
+        waiter = stop_event if stop_event is not None else _shutdown_event
+        if waiter.wait(slice_):
+            return True
 
 
 def _live_stuck_senders() -> int:
@@ -1346,8 +1491,38 @@ def load_state(state_file: str) -> dict:
 
 
 def save_state(state_file: str, records: dict):
+    """
+    Write the state file atomically: a temp file in the same directory, then
+    os.replace() onto the real name.
+
+    A plain write_text truncates first and fills in after, so a process killed
+    mid-write (an OS shutdown, a taskkill, a power cut) leaves a half-written
+    file. That is not a harmless loss: the file still *exists*, so load_state
+    reports initialized=True and simply doesn't see the records that were lost
+    past the truncation point — and every one of those contacts gets forwarded
+    a second time on the next start. Duplicate QSOs pushed to WaveLog/QRZ are
+    the most user-visible failure this program has, so the window is worth
+    closing whether or not the shutdown itself was graceful.
+    """
     lines = [json.dumps({"key": key, **records[key]}) for key in sorted(records)]
-    Path(state_file).write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    text = "\n".join(lines) + ("\n" if lines else "")
+
+    path = Path(state_file)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        # Never let a state-file write take the bridge down; the records stay
+        # in memory and the next cycle tries again.
+        log.exception(f"Could not write state file {path}")
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def prune_records(records: dict, current_keys: set) -> dict:
@@ -1474,10 +1649,15 @@ def run(config_path: str = "config.ini", stop_event=None):
     restart_requested = False
 
     try:
+        # The GUI can Start/Stop/Start within one process, so this can't be
+        # left set from a previous run or a console handler would skip its
+        # grace period and clean up while the new loop is still going.
+        _shutdown_complete.clear()
+
         PID_FILE.write_text(str(os.getpid()))
         heartbeat()
 
-        while stop_event is None or not stop_event.is_set():
+        while not _shutdown_event.is_set() and (stop_event is None or not stop_event.is_set()):
             # Anything unexpected here (a parsing edge case, a transient I/O
             # error, a bug in a sender not already caught internally) used to
             # propagate straight out of this loop and kill the whole process
@@ -1563,11 +1743,10 @@ def run(config_path: str = "config.ini", stop_event=None):
         if stop_event is not None:
             log.info("Bridge stopped.")
     finally:
-        for path in (PID_FILE, HEARTBEAT_FILE):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
+        _cleanup_runtime_files()
+        # Tells a waiting Windows console handler it can stop holding the
+        # process open on our behalf.
+        _shutdown_complete.set()
 
     # Exiting non-zero is what makes the restart actually happen: Task
     # Scheduler / launchd / systemd all treat a failed exit as something to
@@ -1813,6 +1992,11 @@ if __name__ == "__main__":
     if "--watchdog" in sys.argv:
         watchdog_check(config_file)
         sys.exit(0)
+
+    # Must happen on the main thread, before run() blocks in the poll loop, so
+    # an OS shutdown or a service stop unwinds through run()'s finally instead
+    # of killing the process where it stands.
+    install_shutdown_handlers()
 
     try:
         run(config_file)
